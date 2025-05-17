@@ -203,29 +203,21 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         self.best_score = float('inf')
         self.best_pose = None
     
-
-
     def initialize_population(self, protein, ligand):
         """
         Initialize random population for genetic algorithm within spherical grid.
-
         Parameters:
         -----------
         protein : Protein
             Protein object
         ligand : Ligand object
-
         Returns:
         --------
         list
             List of (pose, score) tuples
         """
         population = []
-
-        for _ in range(self.population_size):
-            pose = self._generate_valid_pose(protein, ligand, 
-                                            protein.active_site['center'], 
-                                            protein.active_site['radius'])
+        
         # Determine search space
         if protein.active_site:
             center = protein.active_site['center']
@@ -235,7 +227,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             radius = 15.0  # Arbitrary default
 
         self.initialize_grid_points(center, protein=protein)
-
+        
         print(f"Using {self.n_processes} CPU cores for evaluation")
         print(f"Using {self.batch_size} poses per process for evaluation")
         print(f"Using {self.population_size} poses in total")
@@ -245,50 +237,281 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         print(f"Performing local optimization: {self.perform_local_opt}")
         print(f"Grid spacing: {self.grid_spacing}")
         print(f"Grid radius: {self.grid_radius}")
-
-        # Generate initial population
-        for _ in range(self.population_size):
+        
+        # Add retry logic here
+        attempts = 0
+        max_attempts = self.population_size * 10
+        
+        # Generate initial population with retry logic
+        while len(population) < self.population_size and attempts < max_attempts:
+            attempts += 1
+            
             pose = copy.deepcopy(ligand)
-
+            
             # Select a random point from precomputed spherical grid
             random_grid_point = random.choice(self.grid_points)
-
+            
             # Move the ligand centroid to that random point
             centroid = np.mean(pose.xyz, axis=0)
             translation = random_grid_point - centroid
             pose.translate(translation)
-
+            
             # Apply random rotation with bias toward center of pocket
             rotation = Rotation.random()
             centroid = np.mean(pose.xyz, axis=0)
             vector_to_center = center - centroid
             vector_to_center /= np.linalg.norm(vector_to_center)
-
+            
             # Small rotation (~10 degrees) toward pocket center
             bias_rotation = Rotation.from_rotvec(0.2 * vector_to_center)  # 0.2 rad ≈ 11 degrees
             biased_rotation = rotation * bias_rotation
             rotation_matrix = biased_rotation.as_matrix()
-
+            
             # Apply rotation
             pose.translate(-centroid)
             pose.rotate(rotation_matrix)
             pose.translate(centroid)
-
+            
             # Add random translation
             translation_vector = np.random.normal(1.5, 0.5, size=3)
             pose.translate(translation_vector)
             
             # Filters for valid poses
-            if not self._check_pose_validity(pose, protein):
-                continue  # Skip this pose due to clash
-                
             if not is_within_grid(pose, center, radius):
+                if attempts % 100 == 0:
+                    print(f"Attempt {attempts}: Pose is outside grid, trying again...")
                 continue  # Skip this pose if it's outside the grid
                 
-            # If the pose is valid, add it to the population
+            # Check clash validity with pose relaxation
+            if not self._check_pose_validity(pose, protein):
+                try:
+                    # Try to relax the pose to avoid clashes
+                    relaxed_pose = self._gentle_clash_relief(protein, pose, max_steps=5)
+                    if self._check_pose_validity(relaxed_pose, protein):
+                        population.append((relaxed_pose, None))
+                        if len(population) % 10 == 0:
+                            print(f"Generated {len(population)}/{self.population_size} valid poses (after relaxation)")
+                    else:
+                        if attempts % 100 == 0:
+                            print(f"Attempt {attempts}: Clash could not be resolved, trying again...")
+                except Exception as e:
+                    if attempts % 100 == 0:
+                        print(f"Error during clash resolution: {e}")
+                continue
+            
+            # If we reach here, the pose is valid
             population.append((pose, None))
-
+            if len(population) % 10 == 0:
+                print(f"Generated {len(population)}/{self.population_size} valid poses")
+        
+        if len(population) < self.population_size:
+            print(f"Warning: Could only generate {len(population)}/{self.population_size} valid poses after {attempts} attempts")
+        else:
+            print(f"Successfully generated {len(population)} valid poses (took {attempts} attempts)")
+        
         return population
+    
+    def _evaluate_population(self, protein, population):
+        """
+        Evaluate population using batch processing for improved GPU efficiency.
+        
+        Parameters:
+        -----------
+        protein : Protein
+            Protein object
+        population : list
+            List of (pose, score) tuples
+        
+        Returns:
+        --------
+        list
+            Evaluated population as (pose, score) tuples
+        """
+        # Extract poses from population
+        poses = [pose for pose, _ in population]
+        
+        # Batch scoring with the scoring function
+        if hasattr(self.scoring_function, 'score_batch'):
+            print(f"Using batch scoring for {len(poses)} poses...")
+            scores = self.scoring_function.score_batch(protein, poses)
+            
+            # Combine poses with scores
+            results = [(copy.deepcopy(pose), score) for pose, score in zip(poses, scores)]
+        else:
+            # Fall back to sequential scoring
+            print("Batch scoring not available, using sequential scoring...")
+            results = []
+            for i, (pose, _) in enumerate(population):
+                score = self.scoring_function.score(protein, pose)
+                results.append((copy.deepcopy(pose), score))
+                
+                # Show progress for large populations
+                if i % 10 == 0 and i > 0 and len(population) > 50:
+                    print(f"  Evaluating pose {i}/{len(population)}...")
+        
+        return results
+    # def _evaluate_population_batched(self, protein, population, batch_size=8):
+    #     """
+    #     Evaluate population in batches for improved GPU efficiency.
+        
+    #     Parameters:
+    #     -----------
+    #     protein : Protein
+    #         Protein object
+    #     population : list
+    #         List of (pose, score) tuples
+    #     batch_size : int
+    #         Batch size for parallel evaluation
+        
+    #     Returns:
+    #     --------
+    #     list
+    #         Evaluated population as (pose, score) tuples
+    #     """
+    #     results = []
+        
+    #     # Create batches
+    #     batches = [population[i:i + batch_size] for i in range(0, len(population), batch_size)]
+        
+    #     print(f"Evaluating {len(population)} poses in {len(batches)} batches of size {batch_size}")
+        
+    #     # Process each batch
+    #     for batch_idx, batch in enumerate(batches):
+    #         batch_results = []
+            
+    #         # Check if we can use GPU batch processing
+    #         if (hasattr(self.scoring_function, 'torch_available') and 
+    #             self.scoring_function.torch_available and 
+    #             hasattr(self.scoring_function, 'score_batch')):
+    #             # Process the batch in parallel on GPU using a score_batch method
+    #             # Note: You would need to implement score_batch in your scoring function
+    #             batch_poses = [pose for pose, _ in batch]
+    #             batch_scores = self.scoring_function.score_batch(protein, batch_poses)
+    #             batch_results = [(copy.deepcopy(pose), score) for (pose, _), score in zip(batch, batch_scores)]
+                    
+    #         else:
+    #             # If no GPU batch method available, process with CPU parallelism
+    #             if self.n_processes > 1:
+    #                 # Use process pool for CPU parallelism
+    #                 def score_pose(pose_tuple):
+    #                     pose, _ = pose_tuple
+    #                     score = self.scoring_function.score(protein, pose)
+    #                     return (copy.deepcopy(pose), score)
+                    
+    #                 with mp.Pool(processes=min(self.n_processes, batch_size)) as pool:
+    #                     batch_results = pool.map(score_pose, batch)
+    #             else:
+    #                 # Sequential processing
+    #                 for i, (pose, _) in enumerate(batch):
+    #                     score = self.scoring_function.score(protein, pose)
+    #                     batch_results.append((copy.deepcopy(pose), score))
+            
+    #         # Add results from this batch
+    #         results.extend(batch_results)
+            
+    #         # Print progress
+    #         if batch_idx % max(1, len(batches)//10) == 0:
+    #             print(f"  Evaluated batch {batch_idx+1}/{len(batches)} ({len(results)}/{len(population)} poses)")
+        
+    #     return results
+
+    # def initialize_population(self, protein, ligand):
+    #     """
+    #     Initialize random population for genetic algorithm within spherical grid.
+
+    #     Parameters:
+    #     -----------
+    #     protein : Protein
+    #         Protein object
+    #     ligand : Ligand object
+
+    #     Returns:
+    #     --------
+    #     list
+    #         List of (pose, score) tuples
+    #     """
+    #     population = []
+
+    #     for _ in range(self.population_size):
+    #         pose = self._generate_valid_pose(protein, ligand, 
+    #                                         protein.active_site['center'], 
+    #                                         protein.active_site['radius'])
+    #     # Determine search space
+    #     if protein.active_site:
+    #         center = protein.active_site['center']
+    #         radius = protein.active_site['radius']
+    #     else:
+    #         center = np.mean(protein.xyz, axis=0)
+    #         radius = 15.0  # Arbitrary default
+
+    #     self.initialize_grid_points(center, protein=protein)
+
+    #     print(f"Using {self.n_processes} CPU cores for evaluation")
+    #     print(f"Using {self.batch_size} poses per process for evaluation")
+    #     print(f"Using {self.population_size} poses in total")
+    #     print(f"Using {self.mutation_rate} mutation rate")
+    #     print(f"Using {self.crossover_rate} crossover rate")
+    #     print(f"Using {self.tournament_size} tournament size")
+    #     print(f"Performing local optimization: {self.perform_local_opt}")
+    #     print(f"Grid spacing: {self.grid_spacing}")
+    #     print(f"Grid radius: {self.grid_radius}")
+
+    #     # # Generate initial population
+    #     # for _ in range(self.population_size):
+    #     #     pose = copy.deepcopy(ligand)
+
+    #         # Add retry logic here
+    #     attempts = 0
+    #     max_attempts = self.population_size * 10
+        
+    #     # Generate initial population with retry logic
+    #     while len(population) < self.population_size and attempts < max_attempts:
+    #         attempts += 1
+            
+    #         pose = copy.deepcopy(ligand)
+
+    #         # Select a random point from precomputed spherical grid
+    #         random_grid_point = random.choice(self.grid_points)
+
+    #         # Move the ligand centroid to that random point
+    #         centroid = np.mean(pose.xyz, axis=0)
+    #         translation = random_grid_point - centroid
+    #         pose.translate(translation)
+
+    #         # Apply random rotation with bias toward center of pocket
+    #         rotation = Rotation.random()
+    #         centroid = np.mean(pose.xyz, axis=0)
+    #         vector_to_center = center - centroid
+    #         vector_to_center /= np.linalg.norm(vector_to_center)
+
+    #         # Small rotation (~10 degrees) toward pocket center
+    #         bias_rotation = Rotation.from_rotvec(0.2 * vector_to_center)  # 0.2 rad ≈ 11 degrees
+    #         biased_rotation = rotation * bias_rotation
+    #         rotation_matrix = biased_rotation.as_matrix()
+
+    #         # Apply rotation
+    #         pose.translate(-centroid)
+    #         pose.rotate(rotation_matrix)
+    #         pose.translate(centroid)
+
+    #         # Add random translation
+    #         translation_vector = np.random.normal(1.5, 0.5, size=3)
+    #         pose.translate(translation_vector)
+            
+    #         # Filters for valid poses
+    #         if not self._check_pose_validity(pose, protein):
+    #             relaxed_pose = self._gentle_clash_relief(protein, pose, max_steps=5)
+    #             if self._check_pose_validity(relaxed_pose, protein):
+    #                 population.append((relaxed_pose, None))
+    #             continue
+
+    #         if not is_within_grid(pose, center, radius):
+    #             continue  # Skip this pose if it's outside the grid
+                
+    #         # If the pose is valid, add it to the population
+    #         population.append((pose, None))
+
+    #     return population
     
     def initialize_smart_grid(self, protein, center, radius, spacing=0.5, margin=0.7):
         """
@@ -659,39 +882,45 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         return all_individuals
     
 
-    def _evaluate_population(self, protein, population):
-        """
-        Evaluate population sequentially to avoid multiprocessing issues.
+    # def _evaluate_population(self, protein, population):
+    #     """
+    #     Evaluate population using batch processing for improved GPU efficiency.
         
-        Parameters:
-        -----------
-        protein : Protein
-            Protein object
-        population : list
-            List of (pose, score) tuples
+    #     Parameters:
+    #     -----------
+    #     protein : Protein
+    #         Protein object
+    #     population : list
+    #         List of (pose, score) tuples
         
-        Returns:
-        --------
-        list
-            Evaluated population as (pose, score) tuples
-        """
-        results = []
+    #     Returns:
+    #     --------
+    #     list
+    #         Evaluated population as (pose, score) tuples
+    #     """
+    #     # Extract poses from population
+    #     poses = [pose for pose, _ in population]
         
-        # Process all poses
-        for i, (pose, _) in enumerate(population):
-            # Show progress for large populations
-            if i % 10 == 0 and i > 0 and len(population) > 50:
-                print(f"  Evaluating pose {i}/{len(population)}...")
+    #     # Batch scoring with the scoring function
+    #     if hasattr(self.scoring_function, 'score_batch'):
+    #         print(f"Using batch scoring for {len(poses)} poses...")
+    #         scores = self.scoring_function.score_batch(protein, poses)
+            
+    #         # Combine poses with scores
+    #         results = [(copy.deepcopy(pose), score) for pose, score in zip(poses, scores)]
+    #     else:
+    #         # Fall back to sequential scoring
+    #         print("Batch scoring not available, using sequential scoring...")
+    #         results = []
+    #         for i, (pose, _) in enumerate(population):
+    #             score = self.scoring_function.score(protein, pose)
+    #             results.append((copy.deepcopy(pose), score))
                 
-            score = self.scoring_function.score(protein, pose)
-            results.append((copy.deepcopy(pose), score))
-
-            if detect_steric_clash(protein.atoms, pose.atoms):
-                score = float('inf')  # or apply a large clash penalty
-            else:
-                score = self.scoring_function.score(protein, pose)
-                
-        return results
+    #             # Show progress for large populations
+    #             if i % 10 == 0 and i > 0 and len(population) > 50:
+    #                 print(f"  Evaluating pose {i}/{len(population)}...")
+        
+    #     return results
     
     def _selection(self, population):
         """
@@ -1008,7 +1237,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
     # Mutation
     ##############
 
-    def _mutate(self, individual, original_individual, center, radius):
+    def _mutate(self, individual, original_individual, protein, center, radius):
         """
         Mutate an individual with probability mutation_rate and respect current radius.
         """
@@ -1040,7 +1269,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             original_xyz = individual.xyz.copy()
 
         # Verify no clashes were introduced
-        if not self._check_pose_validity(individual, self.protein):
+        if not self._check_pose_validity(individual, protein):
             # Revert to original if mutation caused clashes
             individual.xyz = original_xyz
 
@@ -1557,7 +1786,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
                         return True, clash_score * 10
         
         # Return clash status and score
-        return (clash_score > 0.3 or max_overlap > 0.3), clash_score
+        return (clash_score > 0.5 or max_overlap > 0.5), clash_score
 # ------------------------------------------------------------------------------
 # Parallel Random Search
 # ------------------------------------------------------------------------------
@@ -2059,7 +2288,7 @@ class ParallelRandomSearch(RandomSearch):
                         return True, clash_score * 10
         
         # Return clash status and score
-        return (clash_score > 0.3 or max_overlap > 0.3), clash_score
+        return (clash_score > 0.5 or max_overlap > 0.5), clash_score
     
     def _generate_valid_pose(self, protein, ligand, center, radius, max_attempts=50):
         """
