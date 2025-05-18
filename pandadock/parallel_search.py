@@ -32,21 +32,26 @@ class ParallelSearch(DockingSearch):
         return self.improve_rigid_docking(protein, ligand, self.args)
 
     def improve_rigid_docking(self, protein, ligand, args):
-        if not protein.active_site:
-            if hasattr(args, 'site') and args.site:
-                radius = max(getattr(args, 'radius', 15.0), 12.0)
-                protein.define_active_site(args.site, radius)
-            elif hasattr(args, 'detect_pockets') and args.detect_pockets:
-                pockets = protein.detect_pockets()
-                if pockets:
-                    radius = max(pockets[0]['radius'], 15.0)
-                    protein.define_active_site(pockets[0]['center'], radius)
+        # Skip redundant pocket detection if already performed
+        if hasattr(protein, '_pockets_detected') and protein._pockets_detected:
+            print("Using previously detected pockets")
+        else:
+            if not protein.active_site:
+                if hasattr(args, 'site') and args.site:
+                    radius = max(getattr(args, 'radius', 15.0), 12.0)
+                    protein.define_active_site(args.site, radius)
+                elif hasattr(args, 'detect_pockets') and args.detect_pockets:
+                    pockets = protein.detect_pockets()
+                    if pockets:
+                        radius = max(pockets[0]['radius'], 15.0)
+                        protein.define_active_site(pockets[0]['center'], radius)
+                    else:
+                        center = np.mean(protein.xyz, axis=0)
+                        protein.define_active_site(center, 15.0)
                 else:
                     center = np.mean(protein.xyz, axis=0)
                     protein.define_active_site(center, 15.0)
-            else:
-                center = np.mean(protein.xyz, axis=0)
-                protein.define_active_site(center, 15.0)
+            protein._pockets_detected = True  # Mark as detected now
 
         center = protein.active_site['center']
         radius = protein.active_site['radius']
@@ -133,7 +138,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
     to improve performance on multi-core systems.
     """
     
-    def __init__(self, scoring_function, max_iterations=10, population_size=150, 
+    def __init__(self, scoring_function, max_iterations=100, population_size=50, 
                  mutation_rate=0.2, crossover_rate=0.8, tournament_size=3, 
                  n_processes=None, batch_size=None, process_pool=None, 
                  output_dir=None, perform_local_opt=False, grid_spacing=0.375, 
@@ -826,8 +831,10 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
                         child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
                     
                     # Mutation
-                    self._mutate(child1, copy.deepcopy(parent1), center, current_radius)
-                    self._mutate(child2, copy.deepcopy(parent2), center, current_radius)
+                   # self._mutate(child1, copy.deepcopy(parent1), center, current_radius)
+                    self._mutate(individual=child1, original_individual=copy.deepcopy(parent1), center=center, radius=current_radius)
+                   # self._mutate(child2, copy.deepcopy(parent2), center, current_radius)
+                    self._mutate(individual=child2, original_individual=copy.deepcopy(parent2), center=center, radius=current_radius)
 
                     offspring.append((child1, None))
                     offspring.append((child2, None))

@@ -546,8 +546,8 @@ def main():
                             help='Use enhanced scoring function with electrostatics')
         parser.add_argument('--prepare-molecules', action='store_true',
                             help='Prepare protein and ligand before docking (recommended)')
-        parser.add_argument('--population-size', type=int, default=150,
-                            help='Population size for genetic algorithm (default: 150)')
+        parser.add_argument('--population-size', type=int, default=50,
+                            help='Population size for genetic algorithm (default: 50)')
         parser.add_argument('--exhaustiveness', type=int, default=1,
                             help='Number of independent docking runs (default: 1)')
         parser.add_argument('--local-opt', action='store_true', # Default is False
@@ -774,7 +774,7 @@ def main():
                 'site': getattr(args, 'site', None),
                 'radius': getattr(args, 'radius', 10.0),
                 'prepare_molecules': getattr(args, 'prepare_vs_ligands', True),  # Use prepare_vs_ligands
-                'parallel': getattr(args, 'parallel_screening', False),
+                'parallel': getattr(args, 'parallel_screening', True),  # Use parallel_screening
                 'hardware_config': hw_config
             }
             
@@ -872,6 +872,8 @@ def main():
                 update_status(output_dir, no_pockets_detected=True)
         else:
             logger.info("No active site specified, using whole protein")
+        
+        protein._pockets_detected = True
         
         # Check for flexible residues options
         if hasattr(args, 'auto_flex') and args.auto_flex:
