@@ -756,7 +756,7 @@ class CompositeScoringFunction(CPUScoringFunction):
                 f"Entropy: {entropy:.2f}")
             print(f"Total: {total:.2f}")
         
-        return total * -1.0 * 0.03
+        return total * -1.0 
 
     
     

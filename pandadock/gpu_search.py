@@ -1352,6 +1352,25 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         
         return population
     
+    def _evaluate_population(self, protein, population):
+        """
+        Evaluate population using the same scoring function as the CPU version.
+        """
+        results = []
+        
+        # Process all poses
+        for i, (pose, _) in enumerate(population):
+            # Show progress for large populations
+            if i % 10 == 0 and i > 0 and len(population) > 50:
+                print(f"  Evaluating pose {i}/{len(population)}...")
+                    
+            # Use the scoring_function that was passed to the constructor
+            # This ensures consistent scoring between CPU and GPU versions
+            score = self.scoring_function.score(protein, pose)
+            results.append((copy.deepcopy(pose), score))
+                
+        return results
+    
     def _batch_score_poses(self, protein, poses, batch_size=5):
         """
         Score multiple poses in batches for better GPU utilization.
