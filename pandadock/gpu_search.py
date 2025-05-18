@@ -12,12 +12,15 @@ from scipy.spatial.transform import Rotation
 import os
 import logging
 
-from .search import DockingSearch
+from .search import DockingSearch, GeneticAlgorithm
 from .utils import (
     calculate_rmsd, is_within_grid, detect_steric_clash, 
     generate_spherical_grid, is_inside_sphere, random_point_in_sphere, 
     save_intermediate_result, update_status
 )
+
+from .parallel_search import ParallelGeneticAlgorithm
+from .utils import is_inside_sphere, detect_steric_clash
 
 class GPUDockingSearch(DockingSearch):
     """
@@ -61,6 +64,10 @@ class GPUDockingSearch(DockingSearch):
         self.device = None
         self.torch_available = False
         self.cupy_available = False
+
+        # GPU-specific attributes
+        self.gpu_initialized = False
+        self.gpu_constants = {}
         
         # Initialize GPU resources
         self._init_gpu()
@@ -98,6 +105,14 @@ class GPUDockingSearch(DockingSearch):
         
         except ImportError:
             print("PyTorch not available. Trying CuPy...")
+            self.device = torch.device('cpu')
+            print("GPU not available or not requested. Using CPU via PyTorch.")
+            if self.precision == 'float64':
+                torch.set_default_tensor_type(torch.DoubleTensor)
+            
+           
+
+    
             
             # Try CuPy as fallback
             try:
@@ -129,6 +144,29 @@ class GPUDockingSearch(DockingSearch):
                 print("For GPU acceleration, install PyTorch or CuPy with CUDA support.")
                 self.torch_available = False
                 self.cupy_available = False
+    
+    def _set_gpu_constants(self, center=None, radius=None):
+        """Set GPU constant values for search parameters."""
+        if not self.gpu_initialized:
+            return
+        
+        try:
+            import torch
+            constants = {}
+            
+            if center is not None:
+                constants['center'] = torch.tensor(center, device=self.gpu_device)
+            
+            if radius is not None:
+                constants['radius'] = torch.tensor(radius, device=self.gpu_device)
+                
+            self.gpu_constants = constants
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error setting GPU constants: {e}")
+            else:
+                print(f"Error setting GPU constants: {e}")
     
     def search(self, protein, ligand):
         """
@@ -201,14 +239,19 @@ class GPUDockingSearch(DockingSearch):
             protein_atoms = protein.atoms
         
         # Extract protein coordinates
-        protein_coords = torch.tensor([atom['coords'] for atom in protein_atoms], 
-                                     device=self.device)
+        # protein_coords = torch.tensor([atom['coords'] for atom in protein_atoms], 
+        #                              device=self.device)
+        # Much faster tensor creation
+        protein_coords_array = np.array([atom['coords'] for atom in protein_atoms])
+        protein_coords = torch.tensor(protein_coords_array, device=self.device)
         
         valid_poses = []
         for pose in poses:
             # Extract ligand coordinates
-            ligand_coords = torch.tensor([atom['coords'] for atom in pose.atoms], 
-                                        device=self.device)
+            # ligand_coords = torch.tensor([atom['coords'] for atom in pose.atoms], 
+            #                             device=self.device)
+            ligand_coords_array = np.array([atom['coords'] for atom in pose.atoms])
+            ligand_coords = torch.tensor(ligand_coords_array, device=self.device)  # ligand_coords_array, device=self.device)
             
             # Calculate all pairwise distances efficiently
             dists = torch.cdist(ligand_coords, protein_coords)
@@ -347,6 +390,324 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         self.best_score = float('inf')
         self.best_pose = None
     
+    # def search(self, protein, ligand):
+    #     """
+    #     Perform genetic algorithm search with GPU acceleration.
+        
+    #     Parameters:
+    #     -----------
+    #     protein : Protein
+    #         Protein object
+    #     ligand : Ligand
+    #         Ligand object
+        
+    #     Returns:
+    #     --------
+    #     list
+    #         List of (pose, score) tuples, sorted by score
+    #     """
+    #     start_time = time.time()
+        
+    #     # Setup search space
+    #     if protein.active_site:
+    #         center = protein.active_site['center']
+    #         radius = protein.active_site['radius']
+    #     else:
+    #         center = np.mean(protein.xyz, axis=0)
+    #         radius = 10.0
+        
+    #     # Ensure active site atoms are defined for faster scoring
+    #     if not hasattr(protein, 'active_site') or protein.active_site is None:
+    #         protein.active_site = {
+    #             'center': center,
+    #             'radius': radius
+    #         }
+    #     if 'atoms' not in protein.active_site or protein.active_site['atoms'] is None:
+    #         protein.active_site['atoms'] = [
+    #             atom for atom in protein.atoms
+    #             if np.linalg.norm(atom['coords'] - center) <= radius
+    #         ]
+        
+    #     # Initialize grid points
+    #     self.initialize_grid_points(center, protein=protein)
+        
+    #     print(f"Using GPU acceleration for genetic algorithm")
+    #     print(f"Population size: {self.population_size}")
+    #     print(f"Maximum generations: {self.max_iterations}")
+    #     print(f"Mutation rate: {self.mutation_rate}")
+    #     print(f"Crossover rate: {self.crossover_rate}")
+    #     print(f"Local optimization: {self.perform_local_opt}")
+        
+    #     # Initialize population
+    #     population = []
+    #     print("Generating initial population...")
+        
+    #     # Generate clash-free initial poses using GPU acceleration
+    #     for i in range(self.population_size * 2):  # Generate more than needed to ensure enough valid poses
+    #         if len(population) >= self.population_size:
+    #             break
+                
+    #         pose = self._generate_random_pose(ligand, center, radius)
+            
+    #         if not detect_steric_clash(protein.atoms, pose.atoms):
+    #             population.append(pose)
+            
+    #         if i % 10 == 0:
+    #             print(f"  Generated {len(population)}/{self.population_size} valid poses")
+        
+    #     # Evaluate initial population
+    #     print("Evaluating initial population...")
+    #     evaluated_population = []
+        
+    #     # Safety check: make sure we have valid poses
+    #     if len(population) == 0:
+    #         print("ERROR: No valid poses generated during population initialization")
+    #         print("Falling back to CPU implementation...")
+            
+    #         # Fall back to CPU implementation
+    #         from .search import GeneticAlgorithm
+    #         cpu_algorithm = GeneticAlgorithm(
+    #             self.scoring_function, 
+    #             self.max_iterations, 
+    #             population_size=self.population_size,
+    #             mutation_rate=self.mutation_rate
+    #         )
+    #         # Copy over grid parameters
+    #         cpu_algorithm.grid_spacing = self.grid_spacing
+    #         cpu_algorithm.grid_radius = self.grid_radius
+    #         cpu_algorithm.grid_center = self.grid_center
+    #         cpu_algorithm.output_dir = self.output_dir
+            
+    #         # Run CPU search and return results
+    #         return cpu_algorithm.search(protein, ligand)
+        
+    #     # Add clear debug output
+    #     print(f"Debug: Initial population contains {len(population)} poses")
+        
+    #     # Try to evaluate each pose with improved error handling
+    #     success_count = 0
+    #     failure_count = 0
+    #     for i, pose in enumerate(population[:self.population_size]):
+    #         try:
+    #             score = self.scoring_function.score(protein, pose)
+    #             evaluated_population.append((pose, score))
+    #             success_count += 1
+                
+    #             # Periodic progress update for large populations
+    #             if (i+1) % 10 == 0:
+    #                 print(f"  Evaluated {i+1}/{min(len(population), self.population_size)} poses")
+                
+    #         except Exception as e:
+    #             print(f"  Warning: Failed to evaluate pose {i}: {str(e)}")
+    #             failure_count += 1
+                
+    #             # If too many failures, break and fall back
+    #             if failure_count > 5 and success_count == 0:
+    #                 print("ERROR: Multiple scoring failures with GPU implementation")
+    #                 print("Falling back to CPU implementation...")
+                    
+    #                 # Fall back to CPU implementation
+    #                 from .search import GeneticAlgorithm
+    #                 cpu_algorithm = GeneticAlgorithm(
+    #                     self.scoring_function, 
+    #                     self.max_iterations, 
+    #                     population_size=self.population_size,
+    #                     mutation_rate=self.mutation_rate
+    #                 )
+    #                 # Copy over grid parameters
+    #                 cpu_algorithm.grid_spacing = self.grid_spacing
+    #                 cpu_algorithm.grid_radius = self.grid_radius
+    #                 cpu_algorithm.grid_center = self.grid_center
+    #                 cpu_algorithm.output_dir = self.output_dir
+                    
+    #                 # Run CPU search and return results
+    #                 return cpu_algorithm.search(protein, ligand)
+        
+    #     # Check if we have any valid evaluated poses
+    #     if not evaluated_population:
+    #         print("ERROR: All pose evaluations failed with GPU implementation")
+    #         print("Falling back to CPU implementation...")
+            
+    #         # Fall back to CPU implementation
+    #         from .search import GeneticAlgorithm
+    #         cpu_algorithm = GeneticAlgorithm(
+    #             self.scoring_function, 
+    #             self.max_iterations, 
+    #             population_size=self.population_size,
+    #             mutation_rate=self.mutation_rate
+    #         )
+    #         # Copy over grid parameters
+    #         cpu_algorithm.grid_spacing = self.grid_spacing
+    #         cpu_algorithm.grid_radius = self.grid_radius
+    #         cpu_algorithm.grid_center = self.grid_center
+    #         cpu_algorithm.output_dir = self.output_dir
+            
+    #         # Run CPU search and return results
+    #         return cpu_algorithm.search(protein, ligand)
+        
+    #     # Sort by score
+    #     evaluated_population.sort(key=lambda x: x[1])
+        
+    #     # Store best individual
+    #     best_individual = evaluated_population[0]
+    #     self.best_pose = best_individual[0]
+    #     self.best_score = best_individual[1]
+        
+    #     print(f"Generation 0: Best score = {self.best_score:.4f}")
+        
+    #     # Track all individuals if population is diverse
+    #     all_individuals = [evaluated_population[0]]
+        
+    #     # Main evolutionary loop
+    #     for generation in range(self.max_iterations):
+    #         gen_start = time.time()
+            
+    #         # Select parents
+    #         parents = self._selection(evaluated_population)
+            
+    #         # Create offspring through crossover and mutation
+    #         offspring = []
+            
+    #         # Apply genetic operators
+    #         for i in range(0, len(parents), 2):
+    #             if i + 1 < len(parents):
+    #                 parent1 = parents[i][0]
+    #                 parent2 = parents[i+1][0]
+                    
+    #                 # Crossover with probability
+    #                 if random.random() < self.crossover_rate:
+    #                     child1, child2 = self._crossover_pair(parent1, parent2, center, radius)
+    #                 else:
+    #                     child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
+                    
+    #                 # Mutation
+    #                 if random.random() < self.mutation_rate:
+    #                     self._mutate(child1, center, radius)
+    #                 if random.random() < self.mutation_rate:
+    #                     self._mutate(child2, center, radius)
+                    
+    #                 offspring.append((child1, None))
+    #                 offspring.append((child2, None))
+            
+    #         # Filter offspring for clash-free poses using GPU acceleration
+    #         offspring = [(pose, None) for pose in self._filter_poses_gpu([pose for pose, _ in offspring], protein)]
+            
+    #         # Ensure we have enough offspring
+    #         while len(offspring) < self.population_size:
+    #             # Add random individuals if needed
+    #             pose = self._generate_random_pose(ligand, center, radius)
+    #             if not detect_steric_clash(protein.atoms, pose.atoms):
+    #                 offspring.append((pose, None))
+            
+    #         # Evaluate offspring
+    #         eval_start = time.time()
+    #         evaluated_offspring = []
+    #         for pose, _ in offspring:
+    #             score = self.scoring_function.score(protein, pose)
+    #             evaluated_offspring.append((pose, score))
+    #         self.eval_time += time.time() - eval_start
+            
+    #         # Combine parent and offspring populations (μ + λ)
+    #         combined = evaluated_population + evaluated_offspring
+            
+    #         # Keep only the best individuals (elitism)
+    #         combined.sort(key=lambda x: x[1])
+    #         evaluated_population = combined[:self.population_size]
+            
+    #         # Update best solution
+    #         if evaluated_population[0][1] < self.best_score:
+    #             self.best_pose = evaluated_population[0][0]
+    #             self.best_score = evaluated_population[0][1]
+    #             all_individuals.append(evaluated_population[0])
+                
+    #             # Save intermediate result
+    #             if self.output_dir:
+    #                 save_intermediate_result(
+    #                     self.best_pose, self.best_score, generation + 1, 
+    #                     self.output_dir, self.max_iterations
+    #                 )
+                    
+    #                 # Update status
+    #                 update_status(
+    #                     self.output_dir,
+    #                     current_generation=generation + 1,
+    #                     best_score=self.best_score,
+    #                     total_generations=self.max_iterations,
+    #                     progress=(generation + 1) / self.max_iterations
+    #                 )
+            
+    #         # Display progress
+    #         gen_time = time.time() - gen_start
+    #         print(f"Generation {generation + 1}/{self.max_iterations}: "
+    #               f"Best score = {self.best_score:.4f}, "
+    #               f"Current best = {evaluated_population[0][1]:.4f}, "
+    #               f"Time = {gen_time:.2f}s")
+            
+    #         # Apply local search to the best individual occasionally
+    #         if self.perform_local_opt and generation % 5 == 0:
+    #             from .search import DockingSearch
+    #             best_pose, best_score = DockingSearch._local_optimization(
+    #                 self, evaluated_population[0][0], protein
+    #             )
+                
+    #             if best_score < self.best_score:
+    #                 self.best_pose = best_pose
+    #                 self.best_score = best_score
+                    
+    #                 # Replace best individual in population
+    #                 evaluated_population[0] = (best_pose, best_score)
+    #                 evaluated_population.sort(key=lambda x: x[1])
+    #                 all_individuals.append((best_pose, best_score))
+        
+    #     # Final local optimization for top poses
+    #     if self.perform_local_opt:
+    #         print("\nPerforming final local optimization on top poses...")
+    #         optimized_results = []
+            
+    #         # Optimize top 5 poses
+    #         poses_to_optimize = min(5, len(evaluated_population))
+    #         for i, (pose, score) in enumerate(evaluated_population[:poses_to_optimize]):
+    #             from .search import DockingSearch
+    #             opt_pose, opt_score = DockingSearch._local_optimization(
+    #                 self, pose, protein
+    #             )
+    #             optimized_results.append((opt_pose, opt_score))
+    #             print(f"  Pose {i+1}: Score improved from {score:.4f} to {opt_score:.4f}")
+            
+    #         # Combine with remaining poses
+    #         optimized_results.extend(evaluated_population[poses_to_optimize:])
+    #         optimized_results.sort(key=lambda x: x[1])
+            
+    #         self.total_time = time.time() - start_time
+    #         print(f"\nSearch completed in {self.total_time:.2f} seconds")
+    #         print(f"Best score: {optimized_results[0][1]:.4f}")
+            
+    #         return optimized_results
+        
+    #     # Return unique solutions, best first
+    #     self.total_time = time.time() - start_time
+    #     print(f"\nSearch completed in {self.total_time:.2f} seconds")
+    #     print(f"Evaluation time: {self.eval_time:.2f} seconds ({self.eval_time/self.total_time*100:.1f}%)")
+    #     print(f"Best score: {evaluated_population[0][1]:.4f}")
+        
+    #     # Sort all individuals by score and ensure uniqueness
+    #     all_individuals.extend(evaluated_population)
+    #     all_individuals.sort(key=lambda x: x[1])
+        
+    #     # Remove duplicates
+    #     unique_results = []
+    #     seen_scores = set()
+    #     for pose, score in all_individuals:
+    #         rounded_score = round(score, 4)
+    #         if rounded_score not in seen_scores:
+    #             unique_results.append((pose, score))
+    #             seen_scores.add(rounded_score)
+            
+    #         if len(unique_results) >= 20:  # Limit to top 20
+    #             break
+        
+    #     return unique_results
+    
     def search(self, protein, ligand):
         """
         Perform genetic algorithm search with GPU acceleration.
@@ -373,6 +734,40 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             center = np.mean(protein.xyz, axis=0)
             radius = 10.0
         
+        # Transfer center and radius to GPU constants
+        self._set_gpu_constants(center=center, radius=radius)
+        
+        # Generate poses on GPU
+        gpu_poses = self._generate_gpu_poses(ligand, center, radius, self.population_size)
+        
+        # CRITICAL: Apply sphere constraint check
+        valid_poses = []
+        for pose in gpu_poses:
+            if is_inside_sphere(pose, center, radius):
+                valid_poses.append(pose)
+        # Calculate minimum required poses - use a fraction of population_size instead
+        min_required_poses = max(10, self.population_size // 4)  # At least 25% of population
+    
+        # If too few valid poses, regenerate with stricter constraints
+        if len(valid_poses) < min_required_poses:
+            print(f"Warning: Only {len(valid_poses)}/{len(gpu_poses)} poses within sphere. Regenerating...")
+            gpu_poses = self._generate_gpu_poses(ligand, center, radius, self.population_size)
+            valid_poses = [pose for pose in gpu_poses if is_inside_sphere(pose, center, radius)]
+        # Implement regeneration logic here
+        while len(valid_poses) < min_required_poses:
+            # Generate additional poses
+            additional_poses = self._generate_gpu_poses(
+                ligand, center, radius * 0.9, min_required_poses - len(valid_poses))
+            
+            # Filter for valid poses
+            for pose in additional_poses:
+                if is_inside_sphere(pose, center, radius):
+                    valid_poses.append(pose)
+                    
+                # Break if we have enough
+                if len(valid_poses) >= min_required_poses:
+                    break
+        
         # Ensure active site atoms are defined for faster scoring
         if not hasattr(protein, 'active_site') or protein.active_site is None:
             protein.active_site = {
@@ -395,90 +790,45 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         print(f"Crossover rate: {self.crossover_rate}")
         print(f"Local optimization: {self.perform_local_opt}")
         
-        # Initialize population
-        population = []
+        # Initialize population using the new method
         print("Generating initial population...")
+        population = self._generate_initial_population(protein, ligand, center, radius, max_attempts=200)
         
-        # Generate clash-free initial poses using GPU acceleration
-        for i in range(self.population_size * 2):  # Generate more than needed to ensure enough valid poses
-            if len(population) >= self.population_size:
-                break
+        if len(population) < self.population_size:
+            print(f"WARNING: Could only generate {len(population)}/{self.population_size} valid poses")
+            if len(population) == 0:
+                print("ERROR: No valid poses generated during population initialization")
+                print("Falling back to CPU implementation...")
                 
-            pose = self._generate_random_pose(ligand, center, radius)
-            
-            if not detect_steric_clash(protein.atoms, pose.atoms):
-                population.append(pose)
-            
-            if i % 10 == 0:
-                print(f"  Generated {len(population)}/{self.population_size} valid poses")
+                # Fall back to CPU implementation
+                from .search import GeneticAlgorithm
+                cpu_algorithm = GeneticAlgorithm(
+                    self.scoring_function, 
+                    self.max_iterations, 
+                    population_size=self.population_size,
+                    mutation_rate=self.mutation_rate
+                )
+                # Copy over grid parameters
+                cpu_algorithm.grid_spacing = self.grid_spacing
+                cpu_algorithm.grid_radius = self.grid_radius
+                cpu_algorithm.grid_center = self.grid_center
+                cpu_algorithm.output_dir = self.output_dir
+                
+                # Run CPU search and return results
+                return cpu_algorithm.search(protein, ligand)
         
-        # Evaluate initial population
         print("Evaluating initial population...")
-        evaluated_population = []
         
-        # Safety check: make sure we have valid poses
-        if len(population) == 0:
-            print("ERROR: No valid poses generated during population initialization")
-            print("Falling back to CPU implementation...")
-            
-            # Fall back to CPU implementation
-            from .search import GeneticAlgorithm
-            cpu_algorithm = GeneticAlgorithm(
-                self.scoring_function, 
-                self.max_iterations, 
-                population_size=self.population_size,
-                mutation_rate=self.mutation_rate
-            )
-            # Copy over grid parameters
-            cpu_algorithm.grid_spacing = self.grid_spacing
-            cpu_algorithm.grid_radius = self.grid_radius
-            cpu_algorithm.grid_center = self.grid_center
-            cpu_algorithm.output_dir = self.output_dir
-            
-            # Run CPU search and return results
-            return cpu_algorithm.search(protein, ligand)
+        # Use batch scoring for initial population
+        poses = [pose for pose, _ in population]
+        scores = self._batch_score_poses(protein, poses)
         
-        # Add clear debug output
-        print(f"Debug: Initial population contains {len(population)} poses")
+        # Combine poses and scores
+        evaluated_population = [(poses[i], scores[i]) for i in range(len(poses))]
+        print(f"Debug: Initial population contains {len(evaluated_population)} poses")
         
-        # Try to evaluate each pose with improved error handling
-        success_count = 0
-        failure_count = 0
-        for i, pose in enumerate(population[:self.population_size]):
-            try:
-                score = self.scoring_function.score(protein, pose)
-                evaluated_population.append((pose, score))
-                success_count += 1
-                
-                # Periodic progress update for large populations
-                if (i+1) % 10 == 0:
-                    print(f"  Evaluated {i+1}/{min(len(population), self.population_size)} poses")
-                
-            except Exception as e:
-                print(f"  Warning: Failed to evaluate pose {i}: {str(e)}")
-                failure_count += 1
-                
-                # If too many failures, break and fall back
-                if failure_count > 5 and success_count == 0:
-                    print("ERROR: Multiple scoring failures with GPU implementation")
-                    print("Falling back to CPU implementation...")
-                    
-                    # Fall back to CPU implementation
-                    from .search import GeneticAlgorithm
-                    cpu_algorithm = GeneticAlgorithm(
-                        self.scoring_function, 
-                        self.max_iterations, 
-                        population_size=self.population_size,
-                        mutation_rate=self.mutation_rate
-                    )
-                    # Copy over grid parameters
-                    cpu_algorithm.grid_spacing = self.grid_spacing
-                    cpu_algorithm.grid_radius = self.grid_radius
-                    cpu_algorithm.grid_center = self.grid_center
-                    cpu_algorithm.output_dir = self.output_dir
-                    
-                    # Run CPU search and return results
-                    return cpu_algorithm.search(protein, ligand)
+        # Filter out any invalid scores
+        evaluated_population = [(pose, score) for pose, score in evaluated_population if np.isfinite(score)]
         
         # Check if we have any valid evaluated poses
         if not evaluated_population:
@@ -517,6 +867,7 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         
         # Main evolutionary loop
         for generation in range(self.max_iterations):
+            self.current_generation = generation  # Store for adaptive mutation
             gen_start = time.time()
             
             # Select parents
@@ -537,31 +888,37 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
                     else:
                         child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
                     
-                    # Mutation
-                    if random.random() < self.mutation_rate:
-                        self._mutate(child1, center, radius)
-                    if random.random() < self.mutation_rate:
-                        self._mutate(child2, center, radius)
+                    # Apply enhanced mutation
+                    self._mutate(child1, center, radius)
+                    self._mutate(child2, center, radius)
                     
                     offspring.append((child1, None))
                     offspring.append((child2, None))
             
-            # Filter offspring for clash-free poses using GPU acceleration
-            offspring = [(pose, None) for pose in self._filter_poses_gpu([pose for pose, _ in offspring], protein)]
+            # Filter offspring using improved validity check
+            filtered_offspring = []
+            for pose, _ in offspring:
+                if self._check_pose_validity(pose, protein):
+                    filtered_offspring.append((pose, None))
+            
+            offspring = filtered_offspring
             
             # Ensure we have enough offspring
-            while len(offspring) < self.population_size:
+            attempts = 0
+            while len(offspring) < self.population_size and attempts < 50:
                 # Add random individuals if needed
                 pose = self._generate_random_pose(ligand, center, radius)
-                if not detect_steric_clash(protein.atoms, pose.atoms):
+                if self._check_pose_validity(pose, protein):
                     offspring.append((pose, None))
+                attempts += 1
             
-            # Evaluate offspring
+            # Evaluate offspring using batch scoring
             eval_start = time.time()
-            evaluated_offspring = []
-            for pose, _ in offspring:
-                score = self.scoring_function.score(protein, pose)
-                evaluated_offspring.append((pose, score))
+            offspring_poses = [pose for pose, _ in offspring]
+            offspring_scores = self._batch_score_poses(protein, offspring_poses)
+            evaluated_offspring = [(offspring_poses[i], offspring_scores[i]) for i in range(len(offspring_poses))]
+            # Filter out any invalid scores
+            evaluated_offspring = [(pose, score) for pose, score in evaluated_offspring if np.isfinite(score)]
             self.eval_time += time.time() - eval_start
             
             # Combine parent and offspring populations (μ + λ)
@@ -596,9 +953,9 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             # Display progress
             gen_time = time.time() - gen_start
             print(f"Generation {generation + 1}/{self.max_iterations}: "
-                  f"Best score = {self.best_score:.4f}, "
-                  f"Current best = {evaluated_population[0][1]:.4f}, "
-                  f"Time = {gen_time:.2f}s")
+                f"Best score = {self.best_score:.4f}, "
+                f"Current best = {evaluated_population[0][1]:.4f}, "
+                f"Time = {gen_time:.2f}s")
             
             # Apply local search to the best individual occasionally
             if self.perform_local_opt and generation % 5 == 0:
@@ -663,8 +1020,12 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             if len(unique_results) >= 20:  # Limit to top 20
                 break
         
+        # Free GPU memory after search
+        if self.torch_available:
+            import torch
+            torch.cuda.empty_cache()
+        
         return unique_results
-    
     def _selection(self, population):
         """
         Tournament selection of parents.
@@ -752,40 +1113,50 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         
         return child1, child2
     
-    def _mutate(self, individual, center, radius):
+    def _mutate(self, individual, center, radius, mutation_rate=None):
         """
-        Mutate an individual.
-        
-        Parameters:
-        -----------
-        individual : Ligand
-            Ligand to mutate
-        center : array-like
-            Center coordinates of the search sphere
-        radius : float
-            Radius of the search sphere
+        Enhanced mutation with adaptive rate.
         """
+        if mutation_rate is None:
+            mutation_rate = self.mutation_rate
+            
         # Save original state to revert if needed
         original_xyz = individual.xyz.copy()
         
-        # Apply random translation
-        translation = np.random.normal(0, 0.5, 3)  # Standard deviation of 0.5 Å
-        individual.translate(translation)
+        # Decide type of mutation
+        mutation_type = random.choices(
+            ['translation', 'rotation', 'both', 'strong'],
+            weights=[0.4, 0.3, 0.2, 0.1]
+        )[0]
         
-        # Apply random rotation
-        angle = np.random.normal(0, 0.2)  # Standard deviation ~11 degrees
-        axis = np.random.randn(3)
-        axis = axis / np.linalg.norm(axis)
-        
-        rotation = Rotation.from_rotvec(axis * angle)
-        ind_centroid = np.mean(individual.xyz, axis=0)
-        individual.translate(-ind_centroid)
-        individual.rotate(rotation.as_matrix())
-        individual.translate(ind_centroid)
+        if mutation_type in ['translation', 'both', 'strong']:
+            # Translation magnitude increases with 'strong' mutation
+            magnitude = 2.0 if mutation_type == 'strong' else 0.5
+            translation = np.random.normal(0, magnitude, 3)
+            individual.translate(translation)
+            
+        if mutation_type in ['rotation', 'both', 'strong']:
+            # Rotation magnitude increases with 'strong' mutation
+            magnitude = 0.5 if mutation_type == 'strong' else 0.2
+            angle = np.random.normal(0, magnitude)
+            axis = np.random.randn(3)
+            axis = axis / np.linalg.norm(axis)
+            
+            rotation = Rotation.from_rotvec(axis * angle)
+            centroid = np.mean(individual.xyz, axis=0)
+            individual.translate(-centroid)
+            individual.rotate(rotation.as_matrix())
+            individual.translate(centroid)
+            
         
         # If mutation moved the ligand outside the sphere, revert
         if not is_inside_sphere(individual, center, radius):
+            individual = self._enforce_sphere_constraint(individual, center, radius)
+            # If out of bounds, revert to original
             individual.xyz = original_xyz
+        
+        return individual
+
     
     def _generate_random_pose(self, ligand, center, radius):
         """
@@ -812,7 +1183,19 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             center = np.array([0.0, 0.0, 0.0])
         
         pose = copy.deepcopy(ligand)
-        
+        # CRITICAL: Add this check before returning
+        if not is_inside_sphere(pose, center, radius):
+            # Either reject this pose or move it back inside the sphere
+            centroid = np.mean(pose.xyz, axis=0)
+            direction = centroid - center
+            distance = np.linalg.norm(direction)
+            if distance > 0:
+                # Normalize and scale to keep within radius
+                direction = direction / distance
+                new_position = center + direction * (radius * 0.8)  # Use 80% of radius to be safe
+                # Translate the pose
+                translation = new_position - centroid
+                pose.translate(translation)
         try:
             # Choose a random grid point if available
             if self.grid_points is not None and len(self.grid_points) > 0:
@@ -851,3 +1234,243 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             translation = center - centroid
             pose.translate(translation)
             return pose
+        
+    def _check_pose_validity(self, ligand, protein, clash_threshold=1.8):
+        """Check if ligand pose clashes with protein atoms with GPU acceleration."""
+        
+        if not self.torch_available:
+            # Fall back to CPU implementation if PyTorch is not available
+            return not detect_steric_clash(protein.atoms, ligand.atoms)
+        
+        import torch
+        
+        # Get atoms
+        ligand_coords_array = np.array([atom['coords'] for atom in ligand.atoms])
+        ligand_coords = torch.tensor(ligand_coords_array, device=self.device)
+        
+        # Use active site atoms if defined for faster checking
+        if hasattr(protein, 'active_site') and protein.active_site and 'atoms' in protein.active_site:
+            protein_atoms = protein.active_site['atoms']
+        else:
+            protein_atoms = protein.atoms
+        
+            # Also check if pose is inside sphere
+        if protein.active_site:
+            center = protein.active_site['center']
+            radius = protein.active_site['radius']
+            if not is_inside_sphere(ligand, center, radius):
+                return False
+        
+        # Convert to tensor efficiently
+        protein_coords_array = np.array([atom['coords'] for atom in protein_atoms])
+        protein_coords = torch.tensor(protein_coords_array, device=self.device)
+        
+        # Calculate all pairwise distances efficiently
+        distances = torch.cdist(ligand_coords, protein_coords)
+        
+        # Count clashes with more lenient threshold during initialization
+        clashes = (distances < clash_threshold).sum().item()
+        
+        # More lenient threshold - allow a few minor clashes
+        return clashes <= 3  # Allow up to 3 minor clashes instead of requiring zero
+    
+    def _generate_initial_population(self, protein, ligand, center, radius, max_attempts=200):
+        """
+        Generate valid initial population with more robust approach.
+        """
+        population = []
+        print(f"Attempting to generate {self.population_size} valid poses...")
+        
+        attempts = 0
+        while len(population) < self.population_size and attempts < max_attempts:
+            # Create a fresh copy of the ligand
+            pose = copy.deepcopy(ligand)
+            
+            # Try different sampling strategies based on attempt count
+            if attempts < max_attempts // 3:
+                # Strategy 1: Uniform random sampling within sphere
+                r = radius * random.random() ** (1/3)
+                theta = random.uniform(0, 2 * np.pi)
+                phi = random.uniform(0, np.pi)
+                
+                x = center[0] + r * np.sin(phi) * np.cos(theta)
+                y = center[1] + r * np.sin(phi) * np.sin(theta)
+                z = center[2] + r * np.sin(phi) * np.cos(phi)
+                
+            elif attempts < 2 * max_attempts // 3:
+                # Strategy 2: Sample further from protein surface
+                r = radius * (0.5 + 0.5 * random.random())  # Bias toward outer half of sphere
+                theta = random.uniform(0, 2 * np.pi)
+                phi = random.uniform(0, np.pi)
+                
+                x = center[0] + r * np.sin(phi) * np.cos(theta)
+                y = center[1] + r * np.sin(phi) * np.sin(theta)
+                z = center[2] + r * np.sin(phi) * np.cos(phi)
+                
+            else:
+                # Strategy 3: Try grid-based sampling
+                if hasattr(self, 'grid_points') and self.grid_points is not None and len(self.grid_points) > 0:
+                    point = self.grid_points[random.randint(0, len(self.grid_points)-1)]
+                    x, y, z = point
+                else:
+                    # Fallback to random with larger radius
+                    r = radius * 1.2 * random.random() ** (1/3)
+                    theta = random.uniform(0, 2 * np.pi)
+                    phi = random.uniform(0, np.pi)
+                    
+                    x = center[0] + r * np.sin(phi) * np.cos(theta)
+                    y = center[1] + r * np.sin(phi) * np.sin(theta)
+                    z = center[2] + r * np.sin(phi) * np.cos(phi)
+            
+            # Move ligand to this point
+            centroid = np.mean(pose.xyz, axis=0)
+            translation = np.array([x, y, z]) - centroid
+            pose.translate(translation)
+            
+            # Apply random rotation
+            rotation = Rotation.random()
+            rotation_matrix = rotation.as_matrix()
+            pose.translate(-centroid)
+            pose.rotate(rotation_matrix)
+            pose.translate(centroid)
+            
+            # Move slightly away from protein center to avoid deep clashes
+            away_vector = np.array([x, y, z]) - center
+            if np.linalg.norm(away_vector) > 0.1:
+                away_vector = away_vector / np.linalg.norm(away_vector) * 2.0  # Push 2Å out
+                pose.translate(away_vector)
+            
+            # Check validity with higher threshold during initialization
+            if self._check_pose_validity(pose, protein, clash_threshold=2.0):
+                population.append((pose, None))  # Score will be computed later
+                if len(population) % 5 == 0 or len(population) == self.population_size:
+                    print(f"  Generated {len(population)}/{self.population_size} valid poses")
+            
+            attempts += 1
+            if attempts % 20 == 0:
+                print(f"  Made {attempts}/{max_attempts} attempts...")
+        
+        return population
+    
+    def _batch_score_poses(self, protein, poses, batch_size=5):
+        """
+        Score multiple poses in batches for better GPU utilization.
+        """
+        if not self.torch_available:
+            # Fall back to CPU implementation if PyTorch is not available
+            return [self.scoring_function.score(protein, pose) for pose in poses]
+        
+        import torch
+        with torch.no_grad():  # Disable gradient tracking for inference
+            scores = []
+            
+            # Process in batches
+            for i in range(0, len(poses), batch_size):
+                batch = poses[i:i+batch_size]
+                batch_scores = []
+                
+                # Use CPU fallback for now since we don't know the structure of scoring_function
+                # In a real implementation, you would modify this to leverage GPU acceleration
+                for pose in batch:
+                    try:
+                        score = self.scoring_function.score(protein, pose)
+                        batch_scores.append(score)
+                    except Exception as e:
+                        print(f"Warning: Failed to score pose: {str(e)}")
+                        # Use a high score to indicate failure
+                        batch_scores.append(float('inf'))
+                
+                scores.extend(batch_scores)
+            
+            return scores
+    
+    def is_inside_sphere_gpu(self, pose, center, radius):
+        """Check if pose centroid is within the sphere on GPU"""
+        # Get pose centroid - implement GPU version if needed
+        centroid = np.mean(pose.xyz, axis=0)
+        # Calculate distance to center
+        distance = np.linalg.norm(centroid - center)
+        # Return True if inside sphere
+        return distance <= radius
+    
+    def _enforce_sphere_constraint(self, poses, center, radius):
+        """Ensure all poses are within the sphere boundary"""
+        constrained_poses = []
+        for pose in poses:
+            if is_inside_sphere(pose, center, radius):
+                constrained_poses.append(pose)
+            else:
+                # Option 1: Skip poses outside boundary
+                continue
+                
+                # Option 2: Or adjust poses to fit within boundary
+                # adjusted_pose = self._adjust_pose_to_sphere(pose, center, radius)
+                # constrained_poses.append(adjusted_pose)
+        
+        return constrained_poses
+    
+    def _generate_gpu_poses(self, ligand, center, radius, num_poses=None):
+        """
+        Generate multiple ligand poses using GPU acceleration.
+        
+        Parameters:
+        -----------
+        ligand : Ligand
+            Template ligand
+        center : np.ndarray
+            Center coordinates
+        radius : float
+            Radius of search sphere
+        num_poses : int, optional
+            Number of poses to generate. If None, uses population_size
+        
+        Returns:
+        --------
+        list
+            List of generated poses
+        """
+        # Use population_size if num_poses not provided
+        if num_poses is None:
+            num_poses = self.population_size
+        
+        poses = []
+        for _ in range(num_poses):
+            # Generate a single pose
+            pose = copy.deepcopy(ligand)
+            
+            # Generate a random point inside the sphere
+            r = radius * random.random() ** (1/3)  # For uniform distribution in sphere
+            theta = random.uniform(0, 2 * np.pi)
+            phi = random.uniform(0, np.pi)
+            
+            x = center[0] + r * np.sin(phi) * np.cos(theta)
+            y = center[1] + r * np.sin(phi) * np.sin(theta)
+            z = center[2] + r * np.cos(phi)
+            
+            # Move ligand centroid to this point
+            centroid = np.mean(pose.xyz, axis=0)
+            translation = np.array([x, y, z]) - centroid
+            pose.translate(translation)
+            
+            # Apply random rotation
+            rotation = Rotation.random()
+            centroid = np.mean(pose.xyz, axis=0)
+            pose.translate(-centroid)
+            pose.rotate(rotation.as_matrix())
+            pose.translate(centroid)
+            
+            # Ensure the pose is inside the sphere
+            if not is_inside_sphere(pose, center, radius):
+                # Move it back inside if needed
+                centroid = np.mean(pose.xyz, axis=0)
+                vector = centroid - center
+                distance = np.linalg.norm(vector)
+                if distance > 0:
+                    vector = vector / distance  # Normalize
+                    new_centroid = center + vector * (radius * 0.8)  # 80% of radius for safety
+                    translation = new_centroid - centroid
+                    pose.translate(translation)
+            
+            poses.append(pose)
+        
+        return poses

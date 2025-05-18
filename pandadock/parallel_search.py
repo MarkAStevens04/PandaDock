@@ -139,7 +139,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
     """
     
     def __init__(self, scoring_function, max_iterations=100, population_size=50, 
-                 mutation_rate=0.2, crossover_rate=0.8, tournament_size=3, 
+                 mutation_rate=0.3, crossover_rate=0.8, tournament_size=3, 
                  n_processes=None, batch_size=None, process_pool=None, 
                  output_dir=None, perform_local_opt=False, grid_spacing=0.375, 
                  grid_radius=10.0, grid_center=None, logger=None):
@@ -929,31 +929,49 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         
     #     return results
     
-    def _selection(self, population):
-        """
-        Tournament selection of parents.
+    # def _selection(self, population):
+    #     """
+    #     Tournament selection of parents.
         
-        Parameters:
-        -----------
-        population : list
-            List of (pose, score) tuples
+    #     Parameters:
+    #     -----------
+    #     population : list
+    #         List of (pose, score) tuples
         
-        Returns:
-        --------
-        list
-            Selected parents as (pose, score) tuples
-        """
-        selected = []
+    #     Returns:
+    #     --------
+    #     list
+    #         Selected parents as (pose, score) tuples
+    #     """
+    #     selected = []
         
-        for _ in range(self.population_size):
-            # Select random individuals for tournament
-            tournament = random.sample(population, min(self.tournament_size, len(population)))
+    #     for _ in range(self.population_size):
+    #         # Select random individuals for tournament
+    #         tournament = random.sample(population, min(self.tournament_size, len(population)))
             
-            # Select the best from tournament
+    #         # Select the best from tournament
+    #         tournament.sort(key=lambda x: x[1])
+    #         selected.append(tournament[0])
+        
+    #     return selected
+    # Increase population diversity
+
+    def _selection(self, population):
+        # Tournament selection with diversity preservation
+        selected = []
+        for _ in range(self.population_size):
+            tournament = random.sample(population, min(self.tournament_size, len(population)))
             tournament.sort(key=lambda x: x[1])
             selected.append(tournament[0])
-        
-        return selected
+            
+        # Ensure some diversity by adding some random individuals
+        if len(selected) > 5:
+            random_indices = random.sample(range(len(population)), min(5, len(population)))
+            for idx in random_indices:
+                if population[idx] not in selected:
+                    selected.append(population[idx])
+                    
+        return selected[:self.population_size]
     
     def _crossover_pair(self, parent1, parent2):
         """
