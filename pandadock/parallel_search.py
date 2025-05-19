@@ -9,12 +9,11 @@ import copy
 import random
 import time
 import multiprocessing as mp
-from pathlib import Path
 from scipy.spatial.transform import Rotation, Slerp
 import os
 from scipy.optimize import minimize
 import logging
-import pathlib as Path
+from pathlib import Path
 
 from .search import DockingSearch
 from .search import GeneticAlgorithm, RandomSearch
@@ -644,19 +643,39 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             self.logger.info(f"Initialized total grid with {len(self.grid_points)} points "
                             f"(spacing: {self.grid_spacing}, radius: {self.grid_radius})")
 
-            # Save Light Sphere PDB (subsample)
-            subsample_rate = 20
-            if self.output_dir is not None:
-                sphere_path = Path(self.output_dir) / "sphere.pdb"
-                sphere_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(sphere_path, 'w') as f:
-                    for idx, point in enumerate(self.grid_points):
-                        if idx % subsample_rate == 0:
-                            f.write(
-                                f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
-                                f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
-                            )
+            # # Save Light Sphere PDB (subsample)
+            # subsample_rate = 20
+            # if self.output_dir is not None:
+            #     sphere_path = Path(self.output_dir) / "sphere.pdb"
+            #     sphere_path.parent.mkdir(parents=True, exist_ok=True)
+            #     with open(sphere_path, 'w') as f:
+            #         for idx, point in enumerate(self.grid_points):
+            #             if idx % subsample_rate == 0:
+            #                 f.write(
+            #                     f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
+            #                     f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
+            #                 )
+            #     self.logger.info(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
+
+            # Save grid visualization if output directory exists
+        subsample_rate = 20
+        if self.output_dir is not None:
+            sphere_path = Path(self.output_dir) / "sphere.pdb"
+            sphere_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with open(sphere_path, 'w') as f:
+                for idx, point in enumerate(self.grid_points):
+                    if idx % subsample_rate == 0:
+                        f.write(
+                            f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
+                            f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
+                        )
+            
+            # Add check before logging
+            if hasattr(self, 'logger') and self.logger is not None:
                 self.logger.info(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
+            else:
+                print(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
 
     
     def _adjust_search_radius(self, initial_radius, generation, total_generations):
@@ -1933,6 +1952,14 @@ class ParallelRandomSearch(RandomSearch):
         self.grid_radius = grid_radius
         self.grid_spacing = grid_spacing
         self.grid_center = grid_center
+
+        # Set up logging - always create a logger, but it might be a null logger
+        if output_dir:
+            self.logger = setup_logging(output_dir)
+        else:
+            import logging
+            self.logger = logging.getLogger("null_logger")
+            self.logger.addHandler(logging.NullHandler())
         
     def initialize_smart_grid(self, protein, center, radius, spacing=0.5, margin=0.7):
         """
@@ -2028,15 +2055,20 @@ class ParallelRandomSearch(RandomSearch):
             print(f"Initialized total grid with {len(self.grid_points)} points "
                   f"(spacing: {self.grid_spacing}, radius: {self.grid_radius})")
 
-            # Optional: Save PDB for grid points
-            if self.output_dir:
+            # Save Light Sphere PDB (subsample)
+            subsample_rate = 20
+            if self.output_dir is not None:
                 sphere_path = Path(self.output_dir) / "sphere.pdb"
+                sphere_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(sphere_path, 'w') as f:
-                    for i, pt in enumerate(self.grid_points[::20]):  # subsample
-                        f.write(
-                            f"HETATM{i+1:5d} {'S':<2s}   SPH A   1    "
-                            f"{pt[0]:8.3f}{pt[1]:8.3f}{pt[2]:8.3f}  1.00  0.00          S\n"
-                        )
+                    for idx, point in enumerate(self.grid_points):
+                        if idx % subsample_rate == 0:
+                            f.write(
+                                f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
+                                f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
+                            )
+                self.logger.info(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
+
 
     def _adjust_search_radius(self, initial_radius, iteration, total_iterations):
         """
