@@ -17,7 +17,6 @@ class CustomInstallCommand(install):
             data = json.loads(response.read().decode())
             latest = data["info"]["version"]
             current = self.distribution.get_version()
-
             if version.parse(latest) > version.parse(current):
                 log.warn("\033[91m" + "="*72)
                 log.warn(f"\033[91mWARNING: PandaDock {latest} is available (you have {current})")
@@ -32,7 +31,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="pandadock",
-    version="2.1.0",
+    version="2.2.0",
     author="Dr. Pritam Kumar Panda",
     author_email="pritam@stanford.edu",
     description="A Python based GPU/CPU-accelerated molecular docking tool for computational drug discovery",

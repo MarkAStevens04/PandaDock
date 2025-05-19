@@ -868,8 +868,11 @@ def main():
                     detected_pockets=len(pockets)
                 )
             else:
-                logger.info("No pockets detected, using whole protein")
-                update_status(output_dir, no_pockets_detected=True)
+                # Use a more reasonable default and print a warning
+                center = np.mean(protein.xyz, axis=0)
+                radius = 8.0  # More reasonable default radius
+                protein.define_active_site(center, radius)
+                print(f"WARNING: No binding site specified. Using protein center with radius {radius}Å")
         else:
             logger.info("No active site specified, using whole protein")
         

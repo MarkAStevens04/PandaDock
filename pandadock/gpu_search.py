@@ -11,6 +11,7 @@ from pathlib import Path
 from scipy.spatial.transform import Rotation
 import os
 import logging
+import torch
 
 from .search import DockingSearch, GeneticAlgorithm
 from .utils import (
@@ -1113,50 +1114,152 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         
         return child1, child2
     
-    def _mutate(self, individual, center, radius, mutation_rate=None):
-        """
-        Enhanced mutation with adaptive rate.
-        """
-        if mutation_rate is None:
-            mutation_rate = self.mutation_rate
+    # def _mutate(self, individual, center, radius, mutation_rate=None):
+    #     """
+    #     Enhanced mutation with adaptive rate.
+    #     """
+    #     if mutation_rate is None:
+    #         mutation_rate = self.mutation_rate
             
-        # Save original state to revert if needed
-        original_xyz = individual.xyz.copy()
+    #     # Save original state to revert if needed
+    #     original_xyz = individual.xyz.copy()
         
-        # Decide type of mutation
-        mutation_type = random.choices(
-            ['translation', 'rotation', 'both', 'strong'],
-            weights=[0.4, 0.3, 0.2, 0.1]
-        )[0]
+    #     # Decide type of mutation
+    #     mutation_type = random.choices(
+    #         ['translation', 'rotation', 'both', 'strong'],
+    #         weights=[0.4, 0.3, 0.2, 0.1]
+    #     )[0]
         
-        if mutation_type in ['translation', 'both', 'strong']:
-            # Translation magnitude increases with 'strong' mutation
-            magnitude = 2.0 if mutation_type == 'strong' else 0.5
-            translation = np.random.normal(0, magnitude, 3)
-            individual.translate(translation)
+    #     if mutation_type in ['translation', 'both', 'strong']:
+    #         # Translation magnitude increases with 'strong' mutation
+    #         magnitude = 2.0 if mutation_type == 'strong' else 0.5
+    #         translation = np.random.normal(0, magnitude, 3)
+    #         individual.translate(translation)
             
-        if mutation_type in ['rotation', 'both', 'strong']:
-            # Rotation magnitude increases with 'strong' mutation
-            magnitude = 0.5 if mutation_type == 'strong' else 0.2
-            angle = np.random.normal(0, magnitude)
+    #     if mutation_type in ['rotation', 'both', 'strong']:
+    #         # Rotation magnitude increases with 'strong' mutation
+    #         magnitude = 0.5 if mutation_type == 'strong' else 0.2
+    #         angle = np.random.normal(0, magnitude)
+    #         axis = np.random.randn(3)
+    #         axis = axis / np.linalg.norm(axis)
+            
+    #         rotation = Rotation.from_rotvec(axis * angle)
+    #         centroid = np.mean(individual.xyz, axis=0)
+    #         individual.translate(-centroid)
+    #         individual.rotate(rotation.as_matrix())
+    #         individual.translate(centroid)
+            
+        
+    #     # If mutation moved the ligand outside the sphere, revert
+    #     if not is_inside_sphere(individual, center, radius):
+    #         individual = self._enforce_sphere_constraint(individual, center, radius)
+    #         # If out of bounds, revert to original
+    #         individual.xyz = original_xyz
+        
+    #     return individual
+
+    def _save_sphere_pdb(self, center, radius, filename="sphere.pdb"):
+        """
+        Save a PDB file with a sphere of dummy atoms centered at `center` with radius `radius`.
+        
+        Parameters:
+        -----------
+        center : np.ndarray
+            3D center of the sphere
+        radius : float
+            Radius of the sphere
+        filename : str
+            Output PDB filename
+        """
+        with open(filename, 'w') as f:
+            for i in range(100):  # Sample 100 points on the sphere
+                theta = np.random.uniform(0, 2*np.pi)
+                phi = np.random.uniform(0, np.pi)
+                
+                x = center[0] + radius * np.sin(phi) * np.cos(theta)
+                y = center[1] + radius * np.sin(phi) * np.sin(theta)
+                z = center[2] + radius * np.cos(phi)
+                
+                f.write(
+                    f"ATOM  {i+1:5d}  X   SPH A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          X\n"
+                )
+            f.write("END\n")
+    def _mutate(self, individual, center, radius):
+        """
+        Mutate an individual with probability mutation_rate.
+        
+        Parameters:
+        -----------
+        individual : Ligand or tuple
+            Individual to mutate, either a Ligand object or a (pose, score) tuple
+        center : array-like
+            Center coordinates of the search sphere
+        radius : float
+            Radius of the search sphere
+        """
+        # Check if we're dealing with a tuple (pose, score)
+        if isinstance(individual, (list, tuple)) and len(individual) >= 1:
+            pose = individual[0]  # Extract the pose from the tuple
+        else:
+            pose = individual  # Assume it's already a Ligand object
+        
+        # Safety check for Ligand object
+        if not hasattr(pose, 'xyz'):
+            print(f"Warning: Expected Ligand object but got {type(pose)}")
+            return individual  # Return unchanged
+        
+        # Save original coordinates for potential reversion
+        original_xyz = pose.xyz.copy()
+        
+        # Only mutate with probability self.mutation_rate
+        if random.random() >= self.mutation_rate:
+            return individual  # No mutation
+        
+        # Apply random mutation
+        mutation_type = random.choice(['translation', 'rotation', 'both'])
+        
+        if mutation_type in ['translation', 'both']:
+            # Random translation
+            translation = np.random.normal(0, 1.0, 3)  # Standard deviation reduced to 1.0
+            pose.translate(translation)
+        
+        if mutation_type in ['rotation', 'both']:
+            # Random rotation
+            angle = np.random.normal(0, 0.3)  # Reduce from 0.5 to 0.3 radians (~17 degrees)
             axis = np.random.randn(3)
             axis = axis / np.linalg.norm(axis)
             
-            rotation = Rotation.from_rotvec(axis * angle)
-            centroid = np.mean(individual.xyz, axis=0)
-            individual.translate(-centroid)
-            individual.rotate(rotation.as_matrix())
-            individual.translate(centroid)
+            rotation = Rotation.from_rotvec(angle * axis)
+            centroid = np.mean(pose.xyz, axis=0)
+            pose.translate(-centroid)
+            pose.rotate(rotation.as_matrix())
+            pose.translate(centroid)
+        
+        # Check if pose is still within sphere
+        if not is_inside_sphere(pose, center, radius):
+            # Move pose back to sphere boundary
+            centroid = np.mean(pose.xyz, axis=0)
+            to_center = center - centroid
+            dist = np.linalg.norm(to_center)
             
+            if dist > 0:
+                # Calculate how far to move back toward center
+                move_vector = to_center * (dist - radius*0.9)/dist
+                pose.translate(move_vector)
+                
+                # Verify the move worked
+                if not is_inside_sphere(pose, center, radius):
+                    # If still outside, revert to original
+                    pose.xyz = original_xyz
         
-        # If mutation moved the ligand outside the sphere, revert
-        if not is_inside_sphere(individual, center, radius):
-            individual = self._enforce_sphere_constraint(individual, center, radius)
-            # If out of bounds, revert to original
-            individual.xyz = original_xyz
+        # Check if pose is valid (no severe clashes)
+        # This would depend on your implementation of _check_pose_validity
         
-        return individual
-
+        # Return the original tuple structure if input was a tuple
+        if isinstance(individual, (list, tuple)) and len(individual) > 1:
+            return (pose, individual[1])  # (pose, score)
+        else:
+            return pose  # Just return the pose
     
     def _generate_random_pose(self, ligand, center, radius):
         """
@@ -1235,44 +1338,67 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             pose.translate(translation)
             return pose
         
-    def _check_pose_validity(self, ligand, protein, clash_threshold=1.8):
-        """Check if ligand pose clashes with protein atoms with GPU acceleration."""
+    def _check_pose_validity(self, ligand, protein, clash_threshold=2.0):
+        # Safety checks
+        if not ligand.atoms:
+            return False  # No ligand atoms
         
-        if not self.torch_available:
-            # Fall back to CPU implementation if PyTorch is not available
-            return not detect_steric_clash(protein.atoms, ligand.atoms)
+        # Get ligand coordinates
+        ligand_coords = np.array([atom['coords'] for atom in ligand.atoms])
         
-        import torch
-        
-        # Get atoms
-        ligand_coords_array = np.array([atom['coords'] for atom in ligand.atoms])
-        ligand_coords = torch.tensor(ligand_coords_array, device=self.device)
-        
-        # Use active site atoms if defined for faster checking
+        # Get protein coordinates
         if hasattr(protein, 'active_site') and protein.active_site and 'atoms' in protein.active_site:
             protein_atoms = protein.active_site['atoms']
         else:
             protein_atoms = protein.atoms
         
-            # Also check if pose is inside sphere
-        if protein.active_site:
-            center = protein.active_site['center']
-            radius = protein.active_site['radius']
-            if not is_inside_sphere(ligand, center, radius):
-                return False
+        if not protein_atoms:
+            return True  # No protein atoms to clash with
         
-        # Convert to tensor efficiently
-        protein_coords_array = np.array([atom['coords'] for atom in protein_atoms])
-        protein_coords = torch.tensor(protein_coords_array, device=self.device)
+        protein_coords = np.array([atom['coords'] for atom in protein_atoms])
         
-        # Calculate all pairwise distances efficiently
-        distances = torch.cdist(ligand_coords, protein_coords)
+        # Ensure coordinates have proper shape for torch.cdist (batch, dims)
+        if len(ligand_coords) == 0:
+            return False
         
-        # Count clashes with more lenient threshold during initialization
-        clashes = (distances < clash_threshold).sum().item()
+        if len(protein_coords) == 0:
+            return True  # No protein atoms to clash with
+
+        # Convert to torch tensors with proper reshaping
+        ligand_coords = torch.tensor(ligand_coords, device=self.device)
+        protein_coords = torch.tensor(protein_coords, device=self.device)
         
-        # More lenient threshold - allow a few minor clashes
-        return clashes <= 3  # Allow up to 3 minor clashes instead of requiring zero
+        # Reshape if needed (ensure 2D tensors)
+        if ligand_coords.dim() == 1:
+            ligand_coords = ligand_coords.unsqueeze(0)  # Add batch dimension
+        
+        if protein_coords.dim() == 1:
+            protein_coords = protein_coords.unsqueeze(0)  # Add batch dimension
+        
+        # Calculate distances using try-except to catch errors
+        try:
+            distances = torch.cdist(ligand_coords, protein_coords)
+            
+            # Check for clashes
+            if torch.any(distances < clash_threshold):
+                return False  # Clash detected
+            
+            return True
+        except Exception as e:
+            print(f"Warning: Error in distance calculation: {e}")
+            print(f"Ligand shape: {ligand_coords.shape}, Protein shape: {protein_coords.shape}")
+            
+            # Fall back to CPU calculation
+            lig_numpy = ligand_coords.cpu().numpy()
+            prot_numpy = protein_coords.cpu().numpy()
+            
+            for l_coord in lig_numpy:
+                for p_coord in prot_numpy:
+                    distance = np.linalg.norm(l_coord - p_coord)
+                    if distance < clash_threshold:
+                        return False  # Clash detected
+            
+            return True
     
     def _generate_initial_population(self, protein, ligand, center, radius, max_attempts=200):
         """
@@ -1409,11 +1535,58 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         centroid = np.mean(pose.xyz, axis=0)
         # Calculate distance to center
         distance = np.linalg.norm(centroid - center)
+        print(f"Ligand at distance {distance} from center, radius is {radius}")
         # Return True if inside sphere
         return distance <= radius
     
+    # def _enforce_sphere_constraint(self, poses, center, radius):
+    #     """Ensure all poses are within the sphere boundary"""
+    #     constrained_poses = []
+    #     for pose in poses:
+    #         if is_inside_sphere(pose, center, radius):
+    #             constrained_poses.append(pose)
+    #         else:
+    #             # Option 1: Skip poses outside boundary
+    #             continue
+                
+    #             # Option 2: Or adjust poses to fit within boundary
+    #             # adjusted_pose = self._adjust_pose_to_sphere(pose, center, radius)
+    #             # constrained_poses.append(adjusted_pose)
+        
+    #     return constrained_poses
+
     def _enforce_sphere_constraint(self, poses, center, radius):
-        """Ensure all poses are within the sphere boundary"""
+        """
+        Ensure all poses are within the sphere boundary
+        
+        Parameters:
+        -----------
+        poses : Ligand or list of Ligand
+            Single ligand or list of ligands to check
+        center : array-like
+            Center coordinates of sphere
+        radius : float
+            Radius of sphere
+            
+        Returns:
+        --------
+        list
+            List of poses within sphere boundary
+        """
+        # Handle case where 'poses' is a single Ligand object
+        if not isinstance(poses, (list, tuple)) and hasattr(poses, 'atoms'):
+            # Single ligand case
+            if is_inside_sphere(poses, center, radius):
+                return [poses]  # Return as a list containing the single pose
+            else:
+                # Option 1: Return empty list if the pose is outside boundary
+                return []
+                
+                # Option 2: Adjust pose to fit within boundary and return
+                # adjusted_pose = self._adjust_pose_to_sphere(poses, center, radius)
+                # return [adjusted_pose]
+        
+        # Handle case where 'poses' is a collection
         constrained_poses = []
         for pose in poses:
             if is_inside_sphere(pose, center, radius):
@@ -1422,11 +1595,58 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
                 # Option 1: Skip poses outside boundary
                 continue
                 
-                # Option 2: Or adjust poses to fit within boundary
+                # Option 2: Adjust poses to fit within boundary
                 # adjusted_pose = self._adjust_pose_to_sphere(pose, center, radius)
                 # constrained_poses.append(adjusted_pose)
         
         return constrained_poses
+    
+    def _adjust_pose_to_sphere(self, pose, center, radius):
+        """
+        Adjust a pose to fit within a sphere boundary
+        
+        Parameters:
+        -----------
+        pose : Ligand
+            Ligand pose to adjust
+        center : array-like
+            Center coordinates of sphere
+        radius : float
+            Radius of sphere
+            
+        Returns:
+        --------
+        Ligand
+            Adjusted ligand pose
+        """
+        # Create a deep copy to avoid modifying the original
+        import copy
+        adjusted_pose = copy.deepcopy(pose)
+        
+        # Calculate centroid of the pose
+        centroid = np.mean([atom['coords'] for atom in adjusted_pose.atoms], axis=0)
+        
+        # Calculate vector from center to centroid
+        vector = centroid - center
+        
+        # Calculate distance from center to centroid
+        distance = np.linalg.norm(vector)
+        
+        # If pose is outside the sphere, move it to just inside
+        if distance > radius:
+            # Create unit vector
+            unit_vector = vector / distance
+            
+            # Calculate new position (0.9 * radius to give some margin)
+            new_position = center + unit_vector * (0.9 * radius)
+            
+            # Calculate translation vector
+            translation = new_position - centroid
+            
+            # Apply translation
+            adjusted_pose.translate(translation)
+        
+        return adjusted_pose
     
     def _generate_gpu_poses(self, ligand, center, radius, num_poses=None):
         """

@@ -1124,8 +1124,8 @@ class ParallelRandomSearch(RandomSearch):
 
             pose = self._generate_random_pose(ligand, center, current_radius)
             # Apply soft outward nudge to avoid deep burial
-            nudge = np.random.normal(1.5, 0.5, size=3)
-            pose.translate(nudge)
+            # nudge = np.random.normal(1.5, 0.5, size=3)
+            # pose.translate(nudge)
 
             # Initial clash checks
             if detect_steric_clash(protein.atoms, pose.atoms) or not self._check_pose_validity(pose, protein):

@@ -14,6 +14,7 @@ from scipy.spatial.transform import Rotation, Slerp
 import os
 from scipy.optimize import minimize
 import logging
+import pathlib as Path
 
 from .search import DockingSearch
 from .search import GeneticAlgorithm, RandomSearch
@@ -80,7 +81,17 @@ class ParallelSearch(DockingSearch):
             pose.translate(centroid)
 
             # Optional gentle outward nudge
-            pose.translate(np.random.normal(1.5, 0.5, size=3))
+            pose.translate(np.random.normal(0.2, 0.1, size=3))
+
+            if not is_inside_sphere(pose, center, radius):
+                # Calculate centroid-to-center vector
+                centroid = np.mean(pose.xyz, axis=0)
+                to_center = center - centroid
+                # Scale vector to move back to sphere boundary
+                dist = np.linalg.norm(to_center)
+                if dist > 0:
+                    move_vector = to_center * (dist - radius*0.9)/dist
+                    pose.translate(move_vector)
 
             if detect_steric_clash(protein.atoms, pose.atoms):
                 attempts += 1
@@ -281,6 +292,14 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             translation_vector = np.random.normal(1.5, 0.5, size=3)
             pose.translate(translation_vector)
             
+
+            if not is_inside_sphere(pose, center, radius):
+                centroid = np.mean(pose.xyz, axis=0)
+                to_center = center - centroid
+                dist = np.linalg.norm(to_center)
+                if dist > 0:
+                    move_vector = to_center * (dist - radius*0.9)/dist
+                    pose.translate(move_vector)
             # Filters for valid poses
             if not is_within_grid(pose, center, radius):
                 if attempts % 100 == 0:
@@ -754,7 +773,13 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         else:
             center = np.mean(protein.xyz, axis=0)
             radius = 10.0
+
         self.smart_grid_points = self.initialize_smart_grid(protein, center, radius)
+        self.protein = protein  # Store protein for access in crossover
+        self.center = center
+        self.radius = radius
+
+
         # Initialize population with clash-free poses
         population = []
         print("Generating initial clash-free population...")
@@ -992,6 +1017,9 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         # Create deep copies to avoid modifying parents
         child1 = copy.deepcopy(parent1)
         child2 = copy.deepcopy(parent2)
+
+        center = self.protein.active_site['center']
+        radius = self.protein.active_site['radius']
         
         # Calculate centroids
         centroid1 = np.mean(parent1.xyz, axis=0)
@@ -1036,9 +1064,25 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             #print("Child1 failed validation. Attempting repair...")
             child1 = self._repair_conformation(child1)
         
+        if not is_inside_sphere(child1, center, radius):
+            centroid = np.mean(child1.xyz, axis=0)
+            to_center = center - centroid
+            dist = np.linalg.norm(to_center)
+            if dist > 0:
+                move_vector = to_center * (dist - radius*0.9)/dist
+                child1.translate(move_vector)
+            
         if not self._validate_conformation(child2):
             #print("Child2 failed validation. Attempting repair...")
             child2 = self._repair_conformation(child2)
+        
+        if not is_inside_sphere(child2, center, radius):
+            centroid = np.mean(child2.xyz, axis=0)
+            to_center = center - centroid
+            dist = np.linalg.norm(to_center)
+            if dist > 0:
+                move_vector = to_center * (dist - radius*0.9)/dist
+                child2.translate(move_vector)
         
         return child1, child2
 
@@ -1287,6 +1331,16 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
             individual.translate(-centroid)
             individual.rotate(rotation.as_matrix())
             individual.translate(centroid)
+        
+        if not is_inside_sphere(individual, center, radius):
+            # Calculate centroid-to-center vector
+            centroid = np.mean(individual.xyz, axis=0)
+            to_center = center - centroid
+            # Scale vector to move back to sphere boundary
+            dist = np.linalg.norm(to_center)
+            if dist > 0:
+                move_vector = to_center * (dist - radius*0.9)/dist
+                individual.translate(move_vector)
 
         if not is_within_grid(individual, center, radius):
             # If out of bounds, revert to original
@@ -2032,6 +2086,8 @@ class ParallelRandomSearch(RandomSearch):
             center = np.mean(protein.xyz, axis=0)
             radius = 10.0
         self.smart_grid_points = self.initialize_smart_grid(protein, center, radius)
+        # self.center = center
+        # self.radius = radius
         # Initialize population with clash-free poses
         # population = []
         # print("Generating initial clash-free population...")
@@ -2084,11 +2140,21 @@ class ParallelRandomSearch(RandomSearch):
 
             pose = self._generate_random_pose(ligand, center, current_radius)
             # Apply soft outward nudge to avoid deep burial
-            nudge = np.random.normal(1.5, 0.5, size=3)
+            nudge = np.random.normal(0.2, 0.1, size=3)
             pose.translate(nudge)
 
+            if not is_inside_sphere(ligand, center, current_radius):
+                # Calculate centroid-to-center vector
+                centroid = np.mean(pose.xyz, axis=0)
+                to_center = center - centroid
+                # Scale vector to move back to sphere boundary
+                dist = np.linalg.norm(to_center)
+                if dist > 0:
+                    move_vector = to_center * (dist - radius*0.9)/dist
+                    pose.translate(move_vector)
+
             # Initial clash checks
-            if detect_steric_clash(protein.atoms, pose.atoms) or not self._check_pose_validity(pose, protein):
+            if detect_steric_clash(protein.atoms, pose.atoms) or not self._check_pose_validity(pose, protein, center=center, radius=radius):
                 fail_counter += 1
                 if fail_counter >= max_failures:
                     radius += radius_increment
@@ -2100,7 +2166,7 @@ class ParallelRandomSearch(RandomSearch):
             score = self.scoring_function.score(protein, pose)
 
             # Final validation *before* appending
-            if detect_steric_clash(protein.atoms, pose.atoms) or not self._check_pose_validity(pose, protein):
+            if detect_steric_clash(protein.atoms, pose.atoms) or not self._check_pose_validity(pose, protein, center=center, radius=radius):
                 fail_counter += 1
                 if fail_counter >= max_failures:
                     radius += radius_increment
@@ -2190,18 +2256,57 @@ class ParallelRandomSearch(RandomSearch):
         return orientations
 
 
-    def _check_pose_validity(self, ligand, protein, clash_threshold=1.5):
+    # def _check_pose_validity(self, ligand, protein, clash_threshold=1.5):
+    #     """
+    #     Check if ligand pose clashes with protein atoms.
+        
+    #     Parameters:
+    #         ligand: Ligand object with .atoms
+    #         protein: Protein object with .atoms or active_site['atoms']
+    #         clash_threshold: Ångström cutoff for hard clash
+            
+    #     Returns:
+    #         bool: True if pose is valid (no severe clash), False otherwise
+    #     """
+    #     ligand_coords = np.array([atom['coords'] for atom in ligand.atoms])
+    #     if not is_inside_sphere(ligand, self.center, self.radius):
+    #         return False  # Skip this pose and generate a new one
+    #     # Use active site atoms if defined
+    #     if hasattr(protein, 'active_site') and protein.active_site and 'atoms' in protein.active_site:
+    #         protein_coords = np.array([atom['coords'] for atom in protein.active_site['atoms']])
+    #     else:
+    #         protein_coords = np.array([atom['coords'] for atom in protein.atoms])
+        
+    #     for lig_coord in ligand_coords:
+    #         distances = np.linalg.norm(protein_coords - lig_coord, axis=1)
+    #         if np.any(distances < clash_threshold):
+    #             return False  # Clash detected
+    #     # score = self.scoring_function.score_for_pose_generation(protein, ligand)
+    #     # return score < 900.0  # Valid if score is reasonable
+    #     # return True
+    #     is_clashing, _ = self._enhanced_clash_detection(protein, ligand)
+    #     return not is_clashing
+
+    def _check_pose_validity(self, ligand, protein, clash_threshold=1.5, center=None, radius=None):
         """
-        Check if ligand pose clashes with protein atoms.
+        Check if ligand pose clashes with protein atoms and is within sphere.
         
         Parameters:
             ligand: Ligand object with .atoms
             protein: Protein object with .atoms or active_site['atoms']
             clash_threshold: Ångström cutoff for hard clash
+            center: Center of the search sphere (optional)
+            radius: Radius of the search sphere (optional)
             
         Returns:
-            bool: True if pose is valid (no severe clash), False otherwise
+            bool: True if pose is valid (no severe clash and within sphere), False otherwise
         """
+        # Check if ligand is within sphere (if center and radius provided)
+        if center is not None and radius is not None:
+            if not is_inside_sphere(ligand, center, radius):
+                return False
+        
+        # Continue with existing clash detection
         ligand_coords = np.array([atom['coords'] for atom in ligand.atoms])
         
         # Use active site atoms if defined
@@ -2214,11 +2319,12 @@ class ParallelRandomSearch(RandomSearch):
             distances = np.linalg.norm(protein_coords - lig_coord, axis=1)
             if np.any(distances < clash_threshold):
                 return False  # Clash detected
-        # score = self.scoring_function.score_for_pose_generation(protein, ligand)
-        # return score < 900.0  # Valid if score is reasonable
-        # return True
+        
+        # Return True if passes all checks
         is_clashing, _ = self._enhanced_clash_detection(protein, ligand)
         return not is_clashing
+
+
         
 
     def _generate_random_pose(self, ligand, center, radius):
@@ -2233,6 +2339,7 @@ class ParallelRandomSearch(RandomSearch):
 
         pose = copy.deepcopy(ligand)
         centroid = np.mean(pose.xyz, axis=0)
+        
         translation = np.array([x, y, z]) - centroid
         pose.translate(translation)
 

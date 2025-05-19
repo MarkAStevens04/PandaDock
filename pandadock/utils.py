@@ -917,3 +917,30 @@ def write_pose_as_mol2(mol, output_file):
         raise ValueError("Pose molecule is None")
     AllChem.MolToMol2File(mol, output_file)
     print(f"Pose saved to {output_file}")
+
+def save_sphere_pdb(self, center, radius, filename="sphere.pdb"):
+        """
+        Save a PDB file with a sphere of dummy atoms centered at `center` with radius `radius`.
+        
+        Parameters:
+        -----------
+        center : np.ndarray
+            3D center of the sphere
+        radius : float
+            Radius of the sphere
+        filename : str
+            Output PDB filename
+        """
+        with open(filename, 'w') as f:
+            for i in range(100):  # Sample 100 points on the sphere
+                theta = np.random.uniform(0, 2*np.pi)
+                phi = np.random.uniform(0, np.pi)
+                
+                x = center[0] + radius * np.sin(phi) * np.cos(theta)
+                y = center[1] + radius * np.sin(phi) * np.sin(theta)
+                z = center[2] + radius * np.cos(phi)
+                
+                f.write(
+                    f"ATOM  {i+1:5d}  X   SPH A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          X\n"
+                )
+            f.write("END\n")
