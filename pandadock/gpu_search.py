@@ -17,7 +17,7 @@ from .search import DockingSearch, GeneticAlgorithm
 from .utils import (
     calculate_rmsd, is_within_grid, detect_steric_clash, 
     generate_spherical_grid, is_inside_sphere, random_point_in_sphere, 
-    save_intermediate_result, update_status
+    save_intermediate_result, update_status, enforce_sphere_boundary
 )
 
 from .parallel_search import ParallelGeneticAlgorithm
@@ -390,324 +390,6 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         self.total_time = 0.0
         self.best_score = float('inf')
         self.best_pose = None
-    
-    # def search(self, protein, ligand):
-    #     """
-    #     Perform genetic algorithm search with GPU acceleration.
-        
-    #     Parameters:
-    #     -----------
-    #     protein : Protein
-    #         Protein object
-    #     ligand : Ligand
-    #         Ligand object
-        
-    #     Returns:
-    #     --------
-    #     list
-    #         List of (pose, score) tuples, sorted by score
-    #     """
-    #     start_time = time.time()
-        
-    #     # Setup search space
-    #     if protein.active_site:
-    #         center = protein.active_site['center']
-    #         radius = protein.active_site['radius']
-    #     else:
-    #         center = np.mean(protein.xyz, axis=0)
-    #         radius = 10.0
-        
-    #     # Ensure active site atoms are defined for faster scoring
-    #     if not hasattr(protein, 'active_site') or protein.active_site is None:
-    #         protein.active_site = {
-    #             'center': center,
-    #             'radius': radius
-    #         }
-    #     if 'atoms' not in protein.active_site or protein.active_site['atoms'] is None:
-    #         protein.active_site['atoms'] = [
-    #             atom for atom in protein.atoms
-    #             if np.linalg.norm(atom['coords'] - center) <= radius
-    #         ]
-        
-    #     # Initialize grid points
-    #     self.initialize_grid_points(center, protein=protein)
-        
-    #     print(f"Using GPU acceleration for genetic algorithm")
-    #     print(f"Population size: {self.population_size}")
-    #     print(f"Maximum generations: {self.max_iterations}")
-    #     print(f"Mutation rate: {self.mutation_rate}")
-    #     print(f"Crossover rate: {self.crossover_rate}")
-    #     print(f"Local optimization: {self.perform_local_opt}")
-        
-    #     # Initialize population
-    #     population = []
-    #     print("Generating initial population...")
-        
-    #     # Generate clash-free initial poses using GPU acceleration
-    #     for i in range(self.population_size * 2):  # Generate more than needed to ensure enough valid poses
-    #         if len(population) >= self.population_size:
-    #             break
-                
-    #         pose = self._generate_random_pose(ligand, center, radius)
-            
-    #         if not detect_steric_clash(protein.atoms, pose.atoms):
-    #             population.append(pose)
-            
-    #         if i % 10 == 0:
-    #             print(f"  Generated {len(population)}/{self.population_size} valid poses")
-        
-    #     # Evaluate initial population
-    #     print("Evaluating initial population...")
-    #     evaluated_population = []
-        
-    #     # Safety check: make sure we have valid poses
-    #     if len(population) == 0:
-    #         print("ERROR: No valid poses generated during population initialization")
-    #         print("Falling back to CPU implementation...")
-            
-    #         # Fall back to CPU implementation
-    #         from .search import GeneticAlgorithm
-    #         cpu_algorithm = GeneticAlgorithm(
-    #             self.scoring_function, 
-    #             self.max_iterations, 
-    #             population_size=self.population_size,
-    #             mutation_rate=self.mutation_rate
-    #         )
-    #         # Copy over grid parameters
-    #         cpu_algorithm.grid_spacing = self.grid_spacing
-    #         cpu_algorithm.grid_radius = self.grid_radius
-    #         cpu_algorithm.grid_center = self.grid_center
-    #         cpu_algorithm.output_dir = self.output_dir
-            
-    #         # Run CPU search and return results
-    #         return cpu_algorithm.search(protein, ligand)
-        
-    #     # Add clear debug output
-    #     print(f"Debug: Initial population contains {len(population)} poses")
-        
-    #     # Try to evaluate each pose with improved error handling
-    #     success_count = 0
-    #     failure_count = 0
-    #     for i, pose in enumerate(population[:self.population_size]):
-    #         try:
-    #             score = self.scoring_function.score(protein, pose)
-    #             evaluated_population.append((pose, score))
-    #             success_count += 1
-                
-    #             # Periodic progress update for large populations
-    #             if (i+1) % 10 == 0:
-    #                 print(f"  Evaluated {i+1}/{min(len(population), self.population_size)} poses")
-                
-    #         except Exception as e:
-    #             print(f"  Warning: Failed to evaluate pose {i}: {str(e)}")
-    #             failure_count += 1
-                
-    #             # If too many failures, break and fall back
-    #             if failure_count > 5 and success_count == 0:
-    #                 print("ERROR: Multiple scoring failures with GPU implementation")
-    #                 print("Falling back to CPU implementation...")
-                    
-    #                 # Fall back to CPU implementation
-    #                 from .search import GeneticAlgorithm
-    #                 cpu_algorithm = GeneticAlgorithm(
-    #                     self.scoring_function, 
-    #                     self.max_iterations, 
-    #                     population_size=self.population_size,
-    #                     mutation_rate=self.mutation_rate
-    #                 )
-    #                 # Copy over grid parameters
-    #                 cpu_algorithm.grid_spacing = self.grid_spacing
-    #                 cpu_algorithm.grid_radius = self.grid_radius
-    #                 cpu_algorithm.grid_center = self.grid_center
-    #                 cpu_algorithm.output_dir = self.output_dir
-                    
-    #                 # Run CPU search and return results
-    #                 return cpu_algorithm.search(protein, ligand)
-        
-    #     # Check if we have any valid evaluated poses
-    #     if not evaluated_population:
-    #         print("ERROR: All pose evaluations failed with GPU implementation")
-    #         print("Falling back to CPU implementation...")
-            
-    #         # Fall back to CPU implementation
-    #         from .search import GeneticAlgorithm
-    #         cpu_algorithm = GeneticAlgorithm(
-    #             self.scoring_function, 
-    #             self.max_iterations, 
-    #             population_size=self.population_size,
-    #             mutation_rate=self.mutation_rate
-    #         )
-    #         # Copy over grid parameters
-    #         cpu_algorithm.grid_spacing = self.grid_spacing
-    #         cpu_algorithm.grid_radius = self.grid_radius
-    #         cpu_algorithm.grid_center = self.grid_center
-    #         cpu_algorithm.output_dir = self.output_dir
-            
-    #         # Run CPU search and return results
-    #         return cpu_algorithm.search(protein, ligand)
-        
-    #     # Sort by score
-    #     evaluated_population.sort(key=lambda x: x[1])
-        
-    #     # Store best individual
-    #     best_individual = evaluated_population[0]
-    #     self.best_pose = best_individual[0]
-    #     self.best_score = best_individual[1]
-        
-    #     print(f"Generation 0: Best score = {self.best_score:.4f}")
-        
-    #     # Track all individuals if population is diverse
-    #     all_individuals = [evaluated_population[0]]
-        
-    #     # Main evolutionary loop
-    #     for generation in range(self.max_iterations):
-    #         gen_start = time.time()
-            
-    #         # Select parents
-    #         parents = self._selection(evaluated_population)
-            
-    #         # Create offspring through crossover and mutation
-    #         offspring = []
-            
-    #         # Apply genetic operators
-    #         for i in range(0, len(parents), 2):
-    #             if i + 1 < len(parents):
-    #                 parent1 = parents[i][0]
-    #                 parent2 = parents[i+1][0]
-                    
-    #                 # Crossover with probability
-    #                 if random.random() < self.crossover_rate:
-    #                     child1, child2 = self._crossover_pair(parent1, parent2, center, radius)
-    #                 else:
-    #                     child1, child2 = copy.deepcopy(parent1), copy.deepcopy(parent2)
-                    
-    #                 # Mutation
-    #                 if random.random() < self.mutation_rate:
-    #                     self._mutate(child1, center, radius)
-    #                 if random.random() < self.mutation_rate:
-    #                     self._mutate(child2, center, radius)
-                    
-    #                 offspring.append((child1, None))
-    #                 offspring.append((child2, None))
-            
-    #         # Filter offspring for clash-free poses using GPU acceleration
-    #         offspring = [(pose, None) for pose in self._filter_poses_gpu([pose for pose, _ in offspring], protein)]
-            
-    #         # Ensure we have enough offspring
-    #         while len(offspring) < self.population_size:
-    #             # Add random individuals if needed
-    #             pose = self._generate_random_pose(ligand, center, radius)
-    #             if not detect_steric_clash(protein.atoms, pose.atoms):
-    #                 offspring.append((pose, None))
-            
-    #         # Evaluate offspring
-    #         eval_start = time.time()
-    #         evaluated_offspring = []
-    #         for pose, _ in offspring:
-    #             score = self.scoring_function.score(protein, pose)
-    #             evaluated_offspring.append((pose, score))
-    #         self.eval_time += time.time() - eval_start
-            
-    #         # Combine parent and offspring populations (μ + λ)
-    #         combined = evaluated_population + evaluated_offspring
-            
-    #         # Keep only the best individuals (elitism)
-    #         combined.sort(key=lambda x: x[1])
-    #         evaluated_population = combined[:self.population_size]
-            
-    #         # Update best solution
-    #         if evaluated_population[0][1] < self.best_score:
-    #             self.best_pose = evaluated_population[0][0]
-    #             self.best_score = evaluated_population[0][1]
-    #             all_individuals.append(evaluated_population[0])
-                
-    #             # Save intermediate result
-    #             if self.output_dir:
-    #                 save_intermediate_result(
-    #                     self.best_pose, self.best_score, generation + 1, 
-    #                     self.output_dir, self.max_iterations
-    #                 )
-                    
-    #                 # Update status
-    #                 update_status(
-    #                     self.output_dir,
-    #                     current_generation=generation + 1,
-    #                     best_score=self.best_score,
-    #                     total_generations=self.max_iterations,
-    #                     progress=(generation + 1) / self.max_iterations
-    #                 )
-            
-    #         # Display progress
-    #         gen_time = time.time() - gen_start
-    #         print(f"Generation {generation + 1}/{self.max_iterations}: "
-    #               f"Best score = {self.best_score:.4f}, "
-    #               f"Current best = {evaluated_population[0][1]:.4f}, "
-    #               f"Time = {gen_time:.2f}s")
-            
-    #         # Apply local search to the best individual occasionally
-    #         if self.perform_local_opt and generation % 5 == 0:
-    #             from .search import DockingSearch
-    #             best_pose, best_score = DockingSearch._local_optimization(
-    #                 self, evaluated_population[0][0], protein
-    #             )
-                
-    #             if best_score < self.best_score:
-    #                 self.best_pose = best_pose
-    #                 self.best_score = best_score
-                    
-    #                 # Replace best individual in population
-    #                 evaluated_population[0] = (best_pose, best_score)
-    #                 evaluated_population.sort(key=lambda x: x[1])
-    #                 all_individuals.append((best_pose, best_score))
-        
-    #     # Final local optimization for top poses
-    #     if self.perform_local_opt:
-    #         print("\nPerforming final local optimization on top poses...")
-    #         optimized_results = []
-            
-    #         # Optimize top 5 poses
-    #         poses_to_optimize = min(5, len(evaluated_population))
-    #         for i, (pose, score) in enumerate(evaluated_population[:poses_to_optimize]):
-    #             from .search import DockingSearch
-    #             opt_pose, opt_score = DockingSearch._local_optimization(
-    #                 self, pose, protein
-    #             )
-    #             optimized_results.append((opt_pose, opt_score))
-    #             print(f"  Pose {i+1}: Score improved from {score:.4f} to {opt_score:.4f}")
-            
-    #         # Combine with remaining poses
-    #         optimized_results.extend(evaluated_population[poses_to_optimize:])
-    #         optimized_results.sort(key=lambda x: x[1])
-            
-    #         self.total_time = time.time() - start_time
-    #         print(f"\nSearch completed in {self.total_time:.2f} seconds")
-    #         print(f"Best score: {optimized_results[0][1]:.4f}")
-            
-    #         return optimized_results
-        
-    #     # Return unique solutions, best first
-    #     self.total_time = time.time() - start_time
-    #     print(f"\nSearch completed in {self.total_time:.2f} seconds")
-    #     print(f"Evaluation time: {self.eval_time:.2f} seconds ({self.eval_time/self.total_time*100:.1f}%)")
-    #     print(f"Best score: {evaluated_population[0][1]:.4f}")
-        
-    #     # Sort all individuals by score and ensure uniqueness
-    #     all_individuals.extend(evaluated_population)
-    #     all_individuals.sort(key=lambda x: x[1])
-        
-    #     # Remove duplicates
-    #     unique_results = []
-    #     seen_scores = set()
-    #     for pose, score in all_individuals:
-    #         rounded_score = round(score, 4)
-    #         if rounded_score not in seen_scores:
-    #             unique_results.append((pose, score))
-    #             seen_scores.add(rounded_score)
-            
-    #         if len(unique_results) >= 20:  # Limit to top 20
-    #             break
-        
-    #     return unique_results
     
     def search(self, protein, ligand):
         """
@@ -1114,49 +796,6 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
         
         return child1, child2
     
-    # def _mutate(self, individual, center, radius, mutation_rate=None):
-    #     """
-    #     Enhanced mutation with adaptive rate.
-    #     """
-    #     if mutation_rate is None:
-    #         mutation_rate = self.mutation_rate
-            
-    #     # Save original state to revert if needed
-    #     original_xyz = individual.xyz.copy()
-        
-    #     # Decide type of mutation
-    #     mutation_type = random.choices(
-    #         ['translation', 'rotation', 'both', 'strong'],
-    #         weights=[0.4, 0.3, 0.2, 0.1]
-    #     )[0]
-        
-    #     if mutation_type in ['translation', 'both', 'strong']:
-    #         # Translation magnitude increases with 'strong' mutation
-    #         magnitude = 2.0 if mutation_type == 'strong' else 0.5
-    #         translation = np.random.normal(0, magnitude, 3)
-    #         individual.translate(translation)
-            
-    #     if mutation_type in ['rotation', 'both', 'strong']:
-    #         # Rotation magnitude increases with 'strong' mutation
-    #         magnitude = 0.5 if mutation_type == 'strong' else 0.2
-    #         angle = np.random.normal(0, magnitude)
-    #         axis = np.random.randn(3)
-    #         axis = axis / np.linalg.norm(axis)
-            
-    #         rotation = Rotation.from_rotvec(axis * angle)
-    #         centroid = np.mean(individual.xyz, axis=0)
-    #         individual.translate(-centroid)
-    #         individual.rotate(rotation.as_matrix())
-    #         individual.translate(centroid)
-            
-        
-    #     # If mutation moved the ligand outside the sphere, revert
-    #     if not is_inside_sphere(individual, center, radius):
-    #         individual = self._enforce_sphere_constraint(individual, center, radius)
-    #         # If out of bounds, revert to original
-    #         individual.xyz = original_xyz
-        
-    #     return individual
 
     def _save_sphere_pdb(self, center, radius, filename="sphere.pdb"):
         """
@@ -1234,6 +873,7 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             pose.translate(-centroid)
             pose.rotate(rotation.as_matrix())
             pose.translate(centroid)
+            #pose = enforce_sphere_boundary(pose, center, radius)
         
         # Check if pose is still within sphere
         if not is_inside_sphere(pose, center, radius):
@@ -1690,6 +1330,7 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             centroid = np.mean(pose.xyz, axis=0)
             translation = np.array([x, y, z]) - centroid
             pose.translate(translation)
+            #pose = enforce_sphere_boundary(pose, center, radius)
             
             # Apply random rotation
             rotation = Rotation.random()
@@ -1697,6 +1338,7 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
             pose.translate(-centroid)
             pose.rotate(rotation.as_matrix())
             pose.translate(centroid)
+            #pose = enforce_sphere_boundary(pose, center, radius)
             
             # Ensure the pose is inside the sphere
             if not is_inside_sphere(pose, center, radius):
@@ -1711,5 +1353,4 @@ class ParallelGeneticAlgorithm(GPUDockingSearch):
                     pose.translate(translation)
             
             poses.append(pose)
-        
         return poses

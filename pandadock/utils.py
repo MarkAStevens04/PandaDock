@@ -860,13 +860,167 @@ def random_point_in_sphere(center, radius):
 
     return center + np.array([x, y, z])
 
-def is_inside_sphere(pose, center, radius):
+# def is_inside_sphere(pose, center, radius):
+#     """
+#     Check if the ligand pose's centroid is within the active site sphere.
+#     """
+#     centroid = np.mean(pose.xyz, axis=0)
+#     distance = np.linalg.norm(centroid - center)
+#     return distance <= radius
+
+def is_inside_sphere(ligand, center, radius):
+    for atom in ligand.atoms:
+        if np.linalg.norm(atom['coords'] - center) > radius:
+            return False
+    return True
+
+def enforce_sphere_boundary(pose, center, radius):
     """
-    Check if the ligand pose's centroid is within the active site sphere.
+    Ensure all atoms of a ligand stay within the defined spherical boundary.
+    
+    Parameters:
+        pose: Ligand object
+        center: np.array of shape (3,)
+        radius: float
+
+    Returns:
+        pose: Adjusted Ligand object
     """
-    centroid = np.mean(pose.xyz, axis=0)
-    distance = np.linalg.norm(centroid - center)
-    return distance <= radius
+    max_dist = 0.0
+    for atom in pose.atoms:
+        dist = np.linalg.norm(atom['coords'] - center)
+        max_dist = max(max_dist, dist)
+
+    if max_dist > radius:
+        # Calculate the scaling factor to bring all atoms inside
+        scale = (radius * 0.95) / max_dist
+        centroid = np.mean(pose.xyz, axis=0)
+        for i, atom in enumerate(pose.atoms):
+            direction = atom['coords'] - centroid
+            new_coords = centroid + direction * scale
+            pose.atoms[i]['coords'] = new_coords
+            pose.xyz[i] = new_coords
+
+    return pose
+def is_fully_inside_sphere(ligand, center, radius, buffer=0.0):
+        """
+        Check if all atoms of a ligand are inside the sphere.
+        
+        Parameters:
+            ligand: Ligand object with atoms or xyz coordinates
+            center: Center coordinates of the sphere
+            radius: Radius of the sphere
+            buffer: Optional buffer distance (Å) to keep atoms from boundary
+            
+        Returns:
+            bool: True if all atoms are within the sphere boundary
+        """
+        if hasattr(ligand, 'xyz') and ligand.xyz is not None:
+            atom_coords = ligand.xyz
+        elif hasattr(ligand, 'atoms'):
+            atom_coords = np.array([atom['coords'] for atom in ligand.atoms])
+        else:
+            raise ValueError("Ligand must have xyz or atoms attribute")
+        
+        # Calculate distance of each atom to center
+        distances = np.linalg.norm(atom_coords - center, axis=1)
+        
+        # Check if all atoms are within radius (with optional buffer)
+        return np.all(distances <= (radius - buffer))
+
+def reposition_inside_sphere(ligand, center, radius, max_attempts=50):
+        """
+        Reposition a ligand to ensure all atoms are inside the sphere.
+        
+        Parameters:
+            ligand: Ligand object to reposition
+            center: Center coordinates of the sphere
+            radius: Radius of the sphere
+            max_attempts: Maximum repositioning attempts
+            
+        Returns:
+            bool: True if successfully repositioned, False if failed
+        """
+        import copy
+        
+        # Calculate effective molecular radius of ligand
+        if hasattr(ligand, 'xyz'):
+            centroid = np.mean(ligand.xyz, axis=0)
+            atom_coords = ligand.xyz
+        else:
+            atom_coords = np.array([atom['coords'] for atom in ligand.atoms])
+            centroid = np.mean(atom_coords, axis=0)
+        
+        # Calculate molecular radius - distance from centroid to furthest atom
+        molecular_radius = np.max(np.linalg.norm(atom_coords - centroid, axis=1))
+        
+        # If molecular radius is too large for sphere, scale ligand
+        if molecular_radius >= radius * 0.9:
+            print(f"Warning: Ligand radius ({molecular_radius:.2f}Å) approaching sphere radius ({radius:.2f}Å)")
+        
+        # Get current centroid-to-center vector and distance
+        vector_to_center = center - centroid
+        dist_to_center = np.linalg.norm(vector_to_center)
+        
+        # Try to reposition while gradually moving inward
+        for attempt in range(max_attempts):
+            # Scale factor starts at 1.0 and increases to ensure inward movement
+            scale_factor = 1.0 + (attempt / max_attempts) * 0.5
+            
+            # Calculate safe distance to avoid boundary violations
+            safe_distance = radius - molecular_radius - 0.5  # 0.5Å buffer
+            
+            # If we're too far from center, move inward
+            if dist_to_center > safe_distance:
+                # Create normalized direction vector
+                if dist_to_center > 0:
+                    direction = vector_to_center / dist_to_center
+                else:
+                    # Random direction if at center
+                    direction = np.random.randn(3)
+                    direction = direction / np.linalg.norm(direction)
+                
+                # Calculate adjustment vector
+                adjustment = direction * (dist_to_center - safe_distance/scale_factor)
+                
+                # Apply translation
+                ligand.translate(adjustment)
+                
+                # Check if now fully inside
+                if is_fully_inside_sphere(ligand, center, radius, buffer=0.2):
+                    return True
+            else:
+                # Apply small random rotation which may help
+                angle = np.random.uniform(-0.1, 0.1)  # Small rotation angle
+                axis = np.random.randn(3)
+                axis = axis / np.linalg.norm(axis)
+                
+                from scipy.spatial.transform import Rotation
+                rotation = Rotation.from_rotvec(axis * angle)
+                
+                # Apply rotation around centroid
+                centroid = np.mean(ligand.xyz, axis=0)
+                ligand.translate(-centroid)
+                ligand.rotate(rotation.as_matrix())
+                ligand.translate(centroid)
+                
+                # Check if now fully inside
+                if is_fully_inside_sphere(ligand, center, radius, buffer=0.2):
+                    return True
+        
+        # Final attempt: Move directly toward center
+        centroid = np.mean(ligand.xyz, axis=0)
+        vector_to_center = center - centroid
+        dist_to_center = np.linalg.norm(vector_to_center)
+        
+        if dist_to_center > 0:
+            # Move to a position where molecules should fit
+            target_dist = radius * 0.5  # Move to middle of sphere
+            movement = (vector_to_center / dist_to_center) * (dist_to_center - target_dist)
+            ligand.translate(movement)
+        
+        return is_fully_inside_sphere(ligand, center, radius, buffer=0.1)
+
 
 def save_sphere_to_pdb(self, grid_points, output_path):
         """

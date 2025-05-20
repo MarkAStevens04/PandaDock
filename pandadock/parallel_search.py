@@ -20,7 +20,8 @@ from .search import GeneticAlgorithm, RandomSearch
 from .utils import (
     calculate_rmsd, is_within_grid, detect_steric_clash, 
     generate_spherical_grid, generate_cartesian_grid, 
-    is_inside_sphere, random_point_in_sphere, local_optimize_pose
+    is_inside_sphere, random_point_in_sphere, local_optimize_pose, enforce_sphere_boundary, is_fully_inside_sphere, 
+    save_intermediate_result, update_status, reposition_inside_sphere
 )
 
 # ------------------------------------------------------------------------------
@@ -373,169 +374,6 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
                     print(f"  Evaluating pose {i}/{len(population)}...")
         
         return results
-    # def _evaluate_population_batched(self, protein, population, batch_size=8):
-    #     """
-    #     Evaluate population in batches for improved GPU efficiency.
-        
-    #     Parameters:
-    #     -----------
-    #     protein : Protein
-    #         Protein object
-    #     population : list
-    #         List of (pose, score) tuples
-    #     batch_size : int
-    #         Batch size for parallel evaluation
-        
-    #     Returns:
-    #     --------
-    #     list
-    #         Evaluated population as (pose, score) tuples
-    #     """
-    #     results = []
-        
-    #     # Create batches
-    #     batches = [population[i:i + batch_size] for i in range(0, len(population), batch_size)]
-        
-    #     print(f"Evaluating {len(population)} poses in {len(batches)} batches of size {batch_size}")
-        
-    #     # Process each batch
-    #     for batch_idx, batch in enumerate(batches):
-    #         batch_results = []
-            
-    #         # Check if we can use GPU batch processing
-    #         if (hasattr(self.scoring_function, 'torch_available') and 
-    #             self.scoring_function.torch_available and 
-    #             hasattr(self.scoring_function, 'score_batch')):
-    #             # Process the batch in parallel on GPU using a score_batch method
-    #             # Note: You would need to implement score_batch in your scoring function
-    #             batch_poses = [pose for pose, _ in batch]
-    #             batch_scores = self.scoring_function.score_batch(protein, batch_poses)
-    #             batch_results = [(copy.deepcopy(pose), score) for (pose, _), score in zip(batch, batch_scores)]
-                    
-    #         else:
-    #             # If no GPU batch method available, process with CPU parallelism
-    #             if self.n_processes > 1:
-    #                 # Use process pool for CPU parallelism
-    #                 def score_pose(pose_tuple):
-    #                     pose, _ = pose_tuple
-    #                     score = self.scoring_function.score(protein, pose)
-    #                     return (copy.deepcopy(pose), score)
-                    
-    #                 with mp.Pool(processes=min(self.n_processes, batch_size)) as pool:
-    #                     batch_results = pool.map(score_pose, batch)
-    #             else:
-    #                 # Sequential processing
-    #                 for i, (pose, _) in enumerate(batch):
-    #                     score = self.scoring_function.score(protein, pose)
-    #                     batch_results.append((copy.deepcopy(pose), score))
-            
-    #         # Add results from this batch
-    #         results.extend(batch_results)
-            
-    #         # Print progress
-    #         if batch_idx % max(1, len(batches)//10) == 0:
-    #             print(f"  Evaluated batch {batch_idx+1}/{len(batches)} ({len(results)}/{len(population)} poses)")
-        
-    #     return results
-
-    # def initialize_population(self, protein, ligand):
-    #     """
-    #     Initialize random population for genetic algorithm within spherical grid.
-
-    #     Parameters:
-    #     -----------
-    #     protein : Protein
-    #         Protein object
-    #     ligand : Ligand object
-
-    #     Returns:
-    #     --------
-    #     list
-    #         List of (pose, score) tuples
-    #     """
-    #     population = []
-
-    #     for _ in range(self.population_size):
-    #         pose = self._generate_valid_pose(protein, ligand, 
-    #                                         protein.active_site['center'], 
-    #                                         protein.active_site['radius'])
-    #     # Determine search space
-    #     if protein.active_site:
-    #         center = protein.active_site['center']
-    #         radius = protein.active_site['radius']
-    #     else:
-    #         center = np.mean(protein.xyz, axis=0)
-    #         radius = 15.0  # Arbitrary default
-
-    #     self.initialize_grid_points(center, protein=protein)
-
-    #     print(f"Using {self.n_processes} CPU cores for evaluation")
-    #     print(f"Using {self.batch_size} poses per process for evaluation")
-    #     print(f"Using {self.population_size} poses in total")
-    #     print(f"Using {self.mutation_rate} mutation rate")
-    #     print(f"Using {self.crossover_rate} crossover rate")
-    #     print(f"Using {self.tournament_size} tournament size")
-    #     print(f"Performing local optimization: {self.perform_local_opt}")
-    #     print(f"Grid spacing: {self.grid_spacing}")
-    #     print(f"Grid radius: {self.grid_radius}")
-
-    #     # # Generate initial population
-    #     # for _ in range(self.population_size):
-    #     #     pose = copy.deepcopy(ligand)
-
-    #         # Add retry logic here
-    #     attempts = 0
-    #     max_attempts = self.population_size * 10
-        
-    #     # Generate initial population with retry logic
-    #     while len(population) < self.population_size and attempts < max_attempts:
-    #         attempts += 1
-            
-    #         pose = copy.deepcopy(ligand)
-
-    #         # Select a random point from precomputed spherical grid
-    #         random_grid_point = random.choice(self.grid_points)
-
-    #         # Move the ligand centroid to that random point
-    #         centroid = np.mean(pose.xyz, axis=0)
-    #         translation = random_grid_point - centroid
-    #         pose.translate(translation)
-
-    #         # Apply random rotation with bias toward center of pocket
-    #         rotation = Rotation.random()
-    #         centroid = np.mean(pose.xyz, axis=0)
-    #         vector_to_center = center - centroid
-    #         vector_to_center /= np.linalg.norm(vector_to_center)
-
-    #         # Small rotation (~10 degrees) toward pocket center
-    #         bias_rotation = Rotation.from_rotvec(0.2 * vector_to_center)  # 0.2 rad ≈ 11 degrees
-    #         biased_rotation = rotation * bias_rotation
-    #         rotation_matrix = biased_rotation.as_matrix()
-
-    #         # Apply rotation
-    #         pose.translate(-centroid)
-    #         pose.rotate(rotation_matrix)
-    #         pose.translate(centroid)
-
-    #         # Add random translation
-    #         translation_vector = np.random.normal(1.5, 0.5, size=3)
-    #         pose.translate(translation_vector)
-            
-    #         # Filters for valid poses
-    #         if not self._check_pose_validity(pose, protein):
-    #             relaxed_pose = self._gentle_clash_relief(protein, pose, max_steps=5)
-    #             if self._check_pose_validity(relaxed_pose, protein):
-    #                 population.append((relaxed_pose, None))
-    #             continue
-
-    #         if not is_within_grid(pose, center, radius):
-    #             continue  # Skip this pose if it's outside the grid
-                
-    #         # If the pose is valid, add it to the population
-    #         population.append((pose, None))
-
-    #     return population
-    
     def initialize_smart_grid(self, protein, center, radius, spacing=0.5, margin=0.7):
         """
         Create a smart grid that avoids protein atoms, especially backbone.
@@ -642,22 +480,6 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
 
             self.logger.info(f"Initialized total grid with {len(self.grid_points)} points "
                             f"(spacing: {self.grid_spacing}, radius: {self.grid_radius})")
-
-            # # Save Light Sphere PDB (subsample)
-            # subsample_rate = 20
-            # if self.output_dir is not None:
-            #     sphere_path = Path(self.output_dir) / "sphere.pdb"
-            #     sphere_path.parent.mkdir(parents=True, exist_ok=True)
-            #     with open(sphere_path, 'w') as f:
-            #         for idx, point in enumerate(self.grid_points):
-            #             if idx % subsample_rate == 0:
-            #                 f.write(
-            #                     f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
-            #                     f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
-            #                 )
-            #     self.logger.info(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
-
-            # Save grid visualization if output directory exists
         subsample_rate = 20
         if self.output_dir is not None:
             sphere_path = Path(self.output_dir) / "sphere.pdb"
@@ -732,7 +554,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         return orientations
 
 
-    def _check_pose_validity(self, ligand, protein, clash_threshold=1.5):
+    def _check_pose_validity(self, ligand, protein, clash_threshold=2.0):
         """
         Check if ligand pose clashes with protein atoms.
         
@@ -750,20 +572,19 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         bool
             True if pose is valid (no severe clash), False otherwise
         """
-        # ligand_coords = np.array([atom['coords'] for atom in ligand.atoms])
+        ligand_coords = np.array([atom['coords'] for atom in ligand.atoms])
         
-        # # Use active site atoms if defined
-        # if hasattr(protein, 'active_site') and protein.active_site and 'atoms' in protein.active_site:
-        #     protein_coords = np.array([atom['coords'] for atom in protein.active_site['atoms']])
-        # else:
-        #     protein_coords = np.array([atom['coords'] for atom in protein.atoms])
+        # Use active site atoms if defined
+        if hasattr(protein, 'active_site') and protein.active_site and 'atoms' in protein.active_site:
+            protein_coords = np.array([atom['coords'] for atom in protein.active_site['atoms']])
+        else:
+            protein_coords = np.array([atom['coords'] for atom in protein.atoms])
         
-        # for lig_coord in ligand_coords:
-        #     distances = np.linalg.norm(protein_coords - lig_coord, axis=1)
-        #     if np.any(distances < clash_threshold):
-        #         return False  # Clash detected
+        for lig_coord in ligand_coords:
+            distances = np.linalg.norm(protein_coords - lig_coord, axis=1)
+            if np.any(distances < clash_threshold):
+                return False  # Clash detected
         
-        # return True
         is_clashing, _ = self._enhanced_clash_detection(protein, ligand)
         return not is_clashing
 
@@ -807,6 +628,8 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
                 print(f"  {i}/{self.population_size} poses generated")
             
             pose = self._generate_valid_pose(protein, ligand, center, radius)
+            nudge = np.random.normal(0.2, 0.1, size=3)
+            pose.translate(nudge)
             score = self.scoring_function.score(protein, pose)
             population.append((pose, score))
     
@@ -932,74 +755,6 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         # Return results
         return all_individuals
     
-
-    # def _evaluate_population(self, protein, population):
-    #     """
-    #     Evaluate population using batch processing for improved GPU efficiency.
-        
-    #     Parameters:
-    #     -----------
-    #     protein : Protein
-    #         Protein object
-    #     population : list
-    #         List of (pose, score) tuples
-        
-    #     Returns:
-    #     --------
-    #     list
-    #         Evaluated population as (pose, score) tuples
-    #     """
-    #     # Extract poses from population
-    #     poses = [pose for pose, _ in population]
-        
-    #     # Batch scoring with the scoring function
-    #     if hasattr(self.scoring_function, 'score_batch'):
-    #         print(f"Using batch scoring for {len(poses)} poses...")
-    #         scores = self.scoring_function.score_batch(protein, poses)
-            
-    #         # Combine poses with scores
-    #         results = [(copy.deepcopy(pose), score) for pose, score in zip(poses, scores)]
-    #     else:
-    #         # Fall back to sequential scoring
-    #         print("Batch scoring not available, using sequential scoring...")
-    #         results = []
-    #         for i, (pose, _) in enumerate(population):
-    #             score = self.scoring_function.score(protein, pose)
-    #             results.append((copy.deepcopy(pose), score))
-                
-    #             # Show progress for large populations
-    #             if i % 10 == 0 and i > 0 and len(population) > 50:
-    #                 print(f"  Evaluating pose {i}/{len(population)}...")
-        
-    #     return results
-    
-    # def _selection(self, population):
-    #     """
-    #     Tournament selection of parents.
-        
-    #     Parameters:
-    #     -----------
-    #     population : list
-    #         List of (pose, score) tuples
-        
-    #     Returns:
-    #     --------
-    #     list
-    #         Selected parents as (pose, score) tuples
-    #     """
-    #     selected = []
-        
-    #     for _ in range(self.population_size):
-    #         # Select random individuals for tournament
-    #         tournament = random.sample(population, min(self.tournament_size, len(population)))
-            
-    #         # Select the best from tournament
-    #         tournament.sort(key=lambda x: x[1])
-    #         selected.append(tournament[0])
-        
-    #     return selected
-    # Increase population diversity
-
     def _selection(self, population):
         # Tournament selection with diversity preservation
         selected = []
@@ -1073,10 +828,16 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         child1.translate(-centroid1)
         child1.rotate(interpolated_rotation.as_matrix())
         child1.translate(centroid1)
+        child1 = enforce_sphere_boundary(child1, center, radius)
         
         child2.translate(-centroid2)
         child2.rotate(interpolated_rotation.as_matrix())
         child2.translate(centroid2)
+        child2 = enforce_sphere_boundary(child2, center, radius)
+        
+        # Apply interpolated rotation to children
+        centroid1 = np.mean(child1.xyz, axis=0)
+        centroid2 = np.mean(child2.xyz, axis=0)
         
         # Validate children
         if not self._validate_conformation(child1):
@@ -1230,147 +991,212 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         ligand.xyz = result.x.reshape(ligand.xyz.shape)
         return ligand
     
-
-    def _generate_random_pose(self, ligand, center, radius):
+    def is_fully_inside_sphere(ligand, center, radius, buffer=0.0):
         """
-        Generate a random ligand pose within a sphere.
+        Check if all atoms of a ligand are inside the sphere.
         
         Parameters:
-        -----------
-        ligand : Ligand
-            Ligand to position
-        center : array-like
-            Center coordinates
-        radius : float
-            Sphere radius
+            ligand: Ligand object with atoms or xyz coordinates
+            center: Center coordinates of the sphere
+            radius: Radius of the sphere
+            buffer: Optional buffer distance (Å) to keep atoms from boundary
             
         Returns:
-        --------
-        Ligand
-            Ligand with random position and orientation
+            bool: True if all atoms are within the sphere boundary
         """
-        while True:
-            r = radius * random.random() ** (1.0 / 3.0)
-            theta = random.uniform(0, 2 * np.pi)
-            phi = random.uniform(0, np.pi)
+        if hasattr(ligand, 'xyz') and ligand.xyz is not None:
+            atom_coords = ligand.xyz
+        elif hasattr(ligand, 'atoms'):
+            atom_coords = np.array([atom['coords'] for atom in ligand.atoms])
+        else:
+            raise ValueError("Ligand must have xyz or atoms attribute")
+        
+        # Calculate distance of each atom to center
+        distances = np.linalg.norm(atom_coords - center, axis=1)
+        
+        # Check if all atoms are within radius (with optional buffer)
+        return np.all(distances <= (radius - buffer))
 
+    
+    def _generate_valid_pose(self, protein, ligand, center, radius, max_attempts=100):
+        """
+        Generate a valid ligand pose within the sphere that avoids clashes.
+        """
+        for attempt in range(max_attempts):
+            # Create a new pose
+            pose = copy.deepcopy(ligand)
+            
+            # Generate position within sphere, accounting for molecular size
+            # Estimate molecular radius by max distance from centroid to any atom
+            if hasattr(ligand, 'xyz'):
+                centroid = np.mean(ligand.xyz, axis=0)
+                atom_coords = ligand.xyz
+            else:
+                atom_coords = np.array([atom['coords'] for atom in ligand.atoms])
+                centroid = np.mean(atom_coords, axis=0)
+            
+            molecular_radius = np.max(np.linalg.norm(atom_coords - centroid, axis=1))
+            
+            # Maximum radius for random position (leave space for molecule)
+            safe_radius = max(0.1, radius - molecular_radius - 0.5)  # 0.5Å additional buffer
+            
+            # Generate random point inside safe radius
+            r = safe_radius * np.random.random() ** (1/3)  # For uniform sampling in sphere
+            theta = np.random.uniform(0, 2 * np.pi)
+            phi = np.random.uniform(0, np.pi)
+            
+            # Convert to Cartesian coordinates
             x = center[0] + r * np.sin(phi) * np.cos(theta)
             y = center[1] + r * np.sin(phi) * np.sin(theta)
             z = center[2] + r * np.cos(phi)
-
-            pose = copy.deepcopy(ligand)
-            centroid = np.mean(pose.xyz, axis=0)
-            translation = np.array([x, y, z]) - centroid
-            pose.translate(translation)
-
-            if is_within_grid(pose, center, radius):
-                return pose
-
-    def _generate_valid_pose(self, protein, ligand, center, radius, max_attempts=50):
-        """
-        Generate a valid, clash-free pose within the grid.
-        
-        Parameters:
-            protein: Protein object
-            ligand: Ligand object
-            center: Search center
-            radius: Search radius
-            max_attempts: Maximum attempts before giving up
-            
-        Returns:
-            Ligand pose
-        """
-        for attempt in range(max_attempts):
-            # Create a fresh copy
-            pose = copy.deepcopy(ligand)
-            
-            # Choose a random valid grid point
-            if not hasattr(self, 'smart_grid_points') or self.smart_grid_points is None:
-                self.smart_grid_points = self.initialize_smart_grid(protein, center, radius)
-            
-            random_point = random.choice(self.smart_grid_points)
             
             # Move ligand centroid to this point
-            centroid = np.mean(pose.xyz, axis=0)
-            translation = random_point - centroid
+            pose_centroid = np.mean(pose.xyz, axis=0)
+            translation = np.array([x, y, z]) - pose_centroid
             pose.translate(translation)
             
-            # Apply random rotation with bias toward pocket
+            # Apply random rotation
             rotation = Rotation.random()
+            rotation_matrix = rotation.as_matrix()
             
-            # Apply rotation around centroid
-            centroid = np.mean(pose.xyz, axis=0)
-            pose.translate(-centroid)
-            pose.rotate(rotation.as_matrix())
-            pose.translate(centroid)
+            pose_centroid = np.mean(pose.xyz, axis=0) 
+            pose.translate(-pose_centroid)
+            pose.rotate(rotation_matrix)
+            pose.translate(pose_centroid)
             
-            # Check for clashes
-            is_clashing, clash_score = self._enhanced_clash_detection(protein, pose)
+            # Check if pose is fully inside sphere
+            if not is_fully_inside_sphere(pose, center, radius):
+                # Try to reposition to keep all atoms inside sphere
+                if not reposition_inside_sphere(pose, center, radius):
+                    continue  # Skip this pose if repositioning failed
             
-            if not is_clashing:
-                return pose
+            # Check for clashes with protein
+            if not self._check_pose_validity(pose, protein):
+                # Try gentle clash relief before rejecting
+                try:
+                    relaxed_pose = self._gentle_clash_relief(protein, pose, max_steps=5)
+                    if self._check_pose_validity(relaxed_pose, protein) and \
+                    is_fully_inside_sphere(relaxed_pose, center, radius):
+                        return relaxed_pose
+                except Exception as e:
+                    pass  # Ignore errors in clash relief
+                continue
             
-            # Apply gentle clash relief if close to valid
-            if clash_score < 0.5 and attempt > max_attempts // 2:
-                relaxed_pose = self._gentle_clash_relief(protein, pose, max_steps=5, max_movement=0.3)
-                is_clashing, clash_score = self._enhanced_clash_detection(protein, relaxed_pose)
-                if not is_clashing:
-                    return relaxed_pose
+            # If we reach here, pose is valid
+            return pose
         
-        # If we reach here, couldn't find a valid pose in max_attempts
-        # Fall back to least-clashing pose with extra relaxation
-        print("Warning: Couldn't generate clash-free pose. Using relaxed pose with minimal clashes.")
+        # If we exhaust all attempts, use fallback approach
+        print(f"Warning: Could not generate valid pose in {max_attempts} attempts. Using fallback method.")
         return self._generate_minimal_clash_pose(protein, ligand, center, radius)
-    ##############
-    # Mutation
-    ##############
 
-    def _mutate(self, individual, original_individual, protein, center, radius):
+    def _mutate(self, individual, original_individual, center, radius):
         """
-        Mutate an individual with probability mutation_rate and respect current radius.
+        Improved mutation with boundary constraints.
         """
-
         if random.random() >= self.mutation_rate:
             return  # No mutation
-
-        # Perform either translation, rotation, or both
-        mutation_type = random.choice(['translation', 'rotation', 'both'])
-
-        if mutation_type in ['translation', 'both']:
-            translation = np.random.normal(0, 2.0, 3)  # 2.0 Å standard deviation
+        
+        # Store original in case mutation fails
+        backup = copy.deepcopy(individual)
+        
+        # Determine molecular radius for safety calculations
+        atom_coords = individual.xyz
+        centroid = np.mean(atom_coords, axis=0)
+        molecular_radius = np.max(np.linalg.norm(atom_coords - centroid, axis=1))
+        
+        # Calculate safe parameters based on distance from boundary
+        dist_to_center = np.linalg.norm(centroid - center)
+        dist_to_boundary = radius - dist_to_center
+        boundary_factor = min(1.0, dist_to_boundary / (molecular_radius + 0.5))
+        
+        # Scale mutation magnitudes by boundary factor (smaller near boundary)
+        max_translation = 0.5 * boundary_factor  # Smaller steps near boundary
+        max_rotation = 0.2 * boundary_factor     # Smaller rotations near boundary
+        
+        # Choose mutation type with bias toward safer operations near boundary
+        if dist_to_boundary < molecular_radius * 1.5:
+            # Near boundary: prefer rotation or gentle inward movement
+            operations = ['inward', 'rotation', 'gentle_translation']
+            weights = [0.5, 0.4, 0.1]  # Higher weight for boundary-safe operations
+            mutation_type = random.choices(operations, weights=weights, k=1)[0]
+        else:
+            # Far from boundary: more freedom to move
+            operations = ['translation', 'rotation', 'both']
+            weights = [0.4, 0.3, 0.3]
+            mutation_type = random.choices(operations, weights=weights, k=1)[0]
+        
+        # Apply the selected mutation
+        if mutation_type == 'translation':
+            # Random translation with boundary-aware magnitude
+            translation = np.random.normal(0, max_translation, 3)
             individual.translate(translation)
-
-        if mutation_type in ['rotation', 'both']:
-            angle = np.random.normal(0, 0.5)  # ~30 degrees std dev
+            
+        elif mutation_type == 'gentle_translation':
+            # Very small random translation
+            translation = np.random.normal(0, 0.2, 3)
+            individual.translate(translation)
+            
+        elif mutation_type == 'inward':
+            # Move toward center
+            centroid = np.mean(individual.xyz, axis=0)
+            vector_to_center = center - centroid
+            dist_to_center = np.linalg.norm(vector_to_center)
+            
+            if dist_to_center > 0:
+                # Random inward movement magnitude
+                inward_magnitude = min(0.5, dist_to_center * 0.1)
+                move_vector = (vector_to_center / dist_to_center) * np.random.uniform(0.1, inward_magnitude)
+                individual.translate(move_vector)
+                
+        elif mutation_type == 'rotation':
+            # Random rotation with boundary-aware angle
+            angle = np.random.normal(0, max_rotation)
             axis = np.random.randn(3)
             axis = axis / np.linalg.norm(axis)
-
-            rotation = Rotation.from_rotvec(angle * axis)
+            
+            rotation = Rotation.from_rotvec(axis * angle)
+            centroid = np.mean(individual.xyz, axis=0)
+            individual.translate(-centroid)
+            individual.rotate(rotation.as_matrix())
+            individual.translate(centroid)
+            
+        elif mutation_type == 'both':
+            # Both translation and rotation
+            translation = np.random.normal(0, max_translation * 0.7, 3)
+            individual.translate(translation)
+            
+            angle = np.random.normal(0, max_rotation * 0.7)
+            axis = np.random.randn(3)
+            axis = axis / np.linalg.norm(axis)
+            
+            rotation = Rotation.from_rotvec(axis * angle)
             centroid = np.mean(individual.xyz, axis=0)
             individual.translate(-centroid)
             individual.rotate(rotation.as_matrix())
             individual.translate(centroid)
         
-        if not is_inside_sphere(individual, center, radius):
-            # Calculate centroid-to-center vector
-            centroid = np.mean(individual.xyz, axis=0)
-            to_center = center - centroid
-            # Scale vector to move back to sphere boundary
-            dist = np.linalg.norm(to_center)
-            if dist > 0:
-                move_vector = to_center * (dist - radius*0.9)/dist
-                individual.translate(move_vector)
-
-        if not is_within_grid(individual, center, radius):
-            # If out of bounds, revert to original
-            individual.xyz = original_individual.xyz.copy()
-            original_xyz = individual.xyz.copy()
-
+        # Verify all atoms are inside sphere
+        if not is_fully_inside_sphere(individual, center, radius):
+            # Try to reposition
+            if not reposition_inside_sphere(individual, center, radius):
+                # Revert to original if repositioning failed
+                individual.xyz = backup.xyz.copy()
+                
+                # Optionally try a minimal inward movement as last resort
+                centroid = np.mean(individual.xyz, axis=0)
+                vector_to_center = center - centroid
+                dist_to_center = np.linalg.norm(vector_to_center)
+                
+                if dist_to_center > 0:
+                    # Very gentle inward nudge
+                    move_vector = (vector_to_center / dist_to_center) * 0.1
+                    individual.translate(move_vector)
+        
         # Verify no clashes were introduced
         if not self._check_pose_validity(individual, protein):
             # Revert to original if mutation caused clashes
-            individual.xyz = original_xyz
-
+            individual.xyz = backup.xyz.copy()
+        
         return individual
 
 
@@ -1679,142 +1505,127 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
         # try using a more specialized method
         print("  Random pose generation failed, trying specialized minimal clash generation...")
         return self._generate_minimal_clash_pose(protein, ligand, center, radius)
-    def _gentle_clash_relief(self, protein, pose, reference=None, max_steps=20, max_movement=0.3):
+    def _gentle_clash_relief(self, protein, pose, reference=None, max_steps=20, max_movement=0.3, radius=None, center=None):
         """
         Gently move atoms to relieve clashes while preserving overall pose.
-        
+
         Parameters:
             protein: Protein object
             pose: Ligand pose
             reference: Reference pose (optional)
             max_steps: Maximum optimization steps
             max_movement: Maximum allowed movement
-            
+            radius: Sphere radius
+            center: Sphere center
+
         Returns:
             Improved ligand pose
         """
         import copy
-        
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+
+        # Fallback center and radius from protein
+        if center is None:
+            center = protein.active_site['center']
+        if radius is None:
+            radius = protein.active_site['radius']
+
         # Make work copy
         working_pose = copy.deepcopy(pose)
         current_score = self.scoring_function.score(protein, working_pose)
         best_pose = copy.deepcopy(working_pose)
         best_score = current_score
-        
-        # Find clashing atoms
-        clashing_atoms = []
+
         is_clashing, _ = self._enhanced_clash_detection(protein, working_pose)
-        
         if not is_clashing:
-            return working_pose
-        
-        # Identify protein atoms in the vicinity of each ligand atom
+            return enforce_sphere_boundary(working_pose, center, radius)
+
         protein_atoms = protein.active_site['atoms'] if hasattr(protein, 'active_site') and 'atoms' in protein.active_site else protein.atoms
         protein_coords = np.array([atom['coords'] for atom in protein_atoms])
-        
-        # For each step
+
         for step in range(max_steps):
             improved = False
-            
-            # Try small translations in all directions
+
+            # Try small translations
             for direction in [
                 [0.1, 0, 0], [-0.1, 0, 0],
                 [0, 0.1, 0], [0, -0.1, 0],
                 [0, 0, 0.1], [0, 0, -0.1],
                 [0.07, 0.07, 0.07], [-0.07, -0.07, -0.07]
             ]:
-                # Create test pose
                 test_pose = copy.deepcopy(working_pose)
                 test_pose.translate(np.array(direction))
-                
-                # Check if translated pose is valid
+                test_pose = enforce_sphere_boundary(test_pose, center, radius)
+
                 is_clashing, clash_score = self._enhanced_clash_detection(protein, test_pose)
-                
                 if not is_clashing:
-                    # Score the clash-free pose
                     test_score = self.scoring_function.score(protein, test_pose)
-                    
                     if test_score < best_score:
                         best_pose = copy.deepcopy(test_pose)
                         best_score = test_score
                         improved = True
                         break
-            
-            # If translations didn't help, try small rotations
-            if not improved:
-                axes = [[1,0,0], [0,1,0], [0,0,1]]
-                angles = [0.05, -0.05, 0.1, -0.1]
-                
-                for axis in axes:
-                    for angle in angles:
-                        # Create test pose
-                        test_pose = copy.deepcopy(working_pose)
-                        
-                        # Apply rotation
-                        rotation = Rotation.from_rotvec(np.array(axis) * angle)
-                        centroid = np.mean(test_pose.xyz, axis=0)
-                        test_pose.translate(-centroid)
-                        test_pose.rotate(rotation.as_matrix())
-                        test_pose.translate(centroid)
-                        
-                        # Check validity
-                        is_clashing, clash_score = self._enhanced_clash_detection(protein, test_pose)
-                        
-                        if not is_clashing:
-                            test_score = self.scoring_function.score(protein, test_pose)
-                            
-                            if test_score < best_score:
-                                best_pose = copy.deepcopy(test_pose)
-                                best_score = test_score
-                                improved = True
-                                break
-                    
-                    if improved:
-                        break
-            
-            # If still not improved, try per-atom movements
+
+            if improved:
+                working_pose = copy.deepcopy(best_pose)
+                continue
+
+            # Try small rotations
+            axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            angles = [0.05, -0.05, 0.1, -0.1]
+
+            for axis in axes:
+                for angle in angles:
+                    test_pose = copy.deepcopy(working_pose)
+                    rotation = Rotation.from_rotvec(np.array(axis) * angle)
+                    centroid = np.mean(test_pose.xyz, axis=0)
+                    test_pose.translate(-centroid)
+                    test_pose.rotate(rotation.as_matrix())
+                    test_pose.translate(centroid)
+                    test_pose = enforce_sphere_boundary(test_pose, center, radius)
+
+                    is_clashing, clash_score = self._enhanced_clash_detection(protein, test_pose)
+                    if not is_clashing:
+                        test_score = self.scoring_function.score(protein, test_pose)
+                        if test_score < best_score:
+                            best_pose = copy.deepcopy(test_pose)
+                            best_score = test_score
+                            improved = True
+                            break
+                if improved:
+                    break
+
             if not improved and step > max_steps // 2:
                 test_pose = self._adjust_clashing_atoms(protein, working_pose)
+                test_pose = enforce_sphere_boundary(test_pose, center, radius)
                 is_clashing, clash_score = self._enhanced_clash_detection(protein, test_pose)
-                
                 if not is_clashing or clash_score < 0.1:
                     test_score = self.scoring_function.score(protein, test_pose)
-                    
-                    if test_score < best_score * 1.5:  # Allow for some score degradation to fix clashes
+                    if test_score < best_score * 1.5:
                         best_pose = copy.deepcopy(test_pose)
                         best_score = test_score
                         improved = True
-            
-            # Update current pose if improved
+
             if improved:
                 working_pose = copy.deepcopy(best_pose)
             else:
-                # If no improvement and clashes persist, move ligand away from protein slightly
                 test_pose = copy.deepcopy(working_pose)
-                
-                # Calculate vector from protein center to ligand center
                 protein_center = np.mean(protein_coords, axis=0)
                 ligand_center = np.mean(test_pose.xyz, axis=0)
-                
-                # Create unit vector pointing away from protein
                 away_vector = ligand_center - protein_center
                 if np.linalg.norm(away_vector) > 0:
                     away_vector = away_vector / np.linalg.norm(away_vector)
-                    
-                    # Move slightly away
                     test_pose.translate(away_vector * 0.2)
-                    
-                    # Check if this helped
+                    test_pose = enforce_sphere_boundary(test_pose, center, radius)
+
                     is_clashing, clash_score = self._enhanced_clash_detection(protein, test_pose)
-                    
                     if not is_clashing or clash_score < 0.1:
                         working_pose = copy.deepcopy(test_pose)
-                        improved = True
-        
-        # Final check
-        is_clashing, clash_score = self._enhanced_clash_detection(protein, best_pose)
-        
+
+        best_pose = enforce_sphere_boundary(best_pose, center, radius)
         return best_pose
+
     
     def _enhanced_clash_detection(self, protein, ligand, clash_threshold=0.7, backbone_threshold=0.75):
         """
