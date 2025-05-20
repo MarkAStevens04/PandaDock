@@ -1193,7 +1193,7 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
                     individual.translate(move_vector)
         
         # Verify no clashes were introduced
-        if not self._check_pose_validity(individual, protein):
+        if not self._check_pose_validity(individual, original_individual, center, radius):
             # Revert to original if mutation caused clashes
             individual.xyz = backup.xyz.copy()
         
