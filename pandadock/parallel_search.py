@@ -21,7 +21,7 @@ from .utils import (
     calculate_rmsd, is_within_grid, detect_steric_clash, 
     generate_spherical_grid, generate_cartesian_grid, 
     is_inside_sphere, random_point_in_sphere, local_optimize_pose, enforce_sphere_boundary, is_fully_inside_sphere, 
-    save_intermediate_result, update_status, reposition_inside_sphere
+    save_intermediate_result, update_status, reposition_inside_sphere, setup_logging
 )
 
 # ------------------------------------------------------------------------------
@@ -1699,8 +1699,6 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm):
 # ------------------------------------------------------------------------------
 # Parallel Random Search
 # ------------------------------------------------------------------------------
-
-
 class ParallelRandomSearch(RandomSearch):
     """
     Parallel implementation of random search for molecular docking.
@@ -2429,7 +2427,6 @@ class ParallelRandomSearch(RandomSearch):
             Improved ligand pose
         """
         import copy
-        
         # Make work copy
         working_pose = copy.deepcopy(pose)
         current_score = self.scoring_function.score(protein, working_pose)
