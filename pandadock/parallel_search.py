@@ -1598,44 +1598,65 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm, GridUtilsMixin, ClashDetectionM
         while len(population) < self.population_size and attempts < max_attempts:
             attempts += 1
             
+            # pose = copy.deepcopy(ligand)
+            
+            # # Select a random point from precomputed spherical grid
+            # random_grid_point = random.choice(self.grid_points)
+            
+            # # Move the ligand centroid to that random point
+            # centroid = np.mean(pose.xyz, axis=0)
+            # translation = random_grid_point - centroid
+            # pose.translate(translation)
+            
+            # # Apply random rotation with bias toward center of pocket
+            # rotation = Rotation.random()
+            # centroid = np.mean(pose.xyz, axis=0)
+            # vector_to_center = center - centroid
+            # vector_to_center /= np.linalg.norm(vector_to_center)
+            
+            # # Small rotation (~10 degrees) toward pocket center
+            # bias_rotation = Rotation.from_rotvec(0.2 * vector_to_center)  # 0.2 rad ≈ 11 degrees
+            # biased_rotation = rotation * bias_rotation
+            # rotation_matrix = biased_rotation.as_matrix()
+            
+            # # Apply rotation
+            # pose.translate(-centroid)
+            # pose.rotate(rotation_matrix)
+            # pose.translate(centroid)
+            
+            # # Add random translation
+            # translation_vector = np.random.normal(1.5, 0.5, size=3)
+            # pose.translate(translation_vector)
+            
+            # # Ensure pose is inside sphere
+            # if not is_inside_sphere(pose, center, radius):
+            #     centroid = np.mean(pose.xyz, axis=0)
+            #     to_center = center - centroid
+            #     dist = np.linalg.norm(to_center)
+            #     if dist > 0:
+            #         move_vector = to_center * (dist - radius*0.9)/dist
+            #         pose.translate(move_vector)
+
             pose = copy.deepcopy(ligand)
-            
-            # Select a random point from precomputed spherical grid
-            random_grid_point = random.choice(self.grid_points)
-            
-            # Move the ligand centroid to that random point
+
+            # Step 1: Align pose to origin
             centroid = np.mean(pose.xyz, axis=0)
-            translation = random_grid_point - centroid
-            pose.translate(translation)
-            
-            # Apply random rotation with bias toward center of pocket
-            rotation = Rotation.random()
-            centroid = np.mean(pose.xyz, axis=0)
-            vector_to_center = center - centroid
-            vector_to_center /= np.linalg.norm(vector_to_center)
-            
-            # Small rotation (~10 degrees) toward pocket center
-            bias_rotation = Rotation.from_rotvec(0.2 * vector_to_center)  # 0.2 rad ≈ 11 degrees
-            biased_rotation = rotation * bias_rotation
-            rotation_matrix = biased_rotation.as_matrix()
-            
-            # Apply rotation
             pose.translate(-centroid)
+
+            # Step 2: Apply random rotation
+            rotation_matrix = Rotation.random().as_matrix()
             pose.rotate(rotation_matrix)
-            pose.translate(centroid)
-            
-            # Add random translation
-            translation_vector = np.random.normal(1.5, 0.5, size=3)
-            pose.translate(translation_vector)
-            
-            # Ensure pose is inside sphere
+
+            # Step 3: Translate to selected grid point
+            random_grid_point = random.choice(self.grid_points)
+            pose.translate(random_grid_point)
+
+            # Step 4: Final check — enforce sphere boundary
             if not is_inside_sphere(pose, center, radius):
                 centroid = np.mean(pose.xyz, axis=0)
-                to_center = center - centroid
-                dist = np.linalg.norm(to_center)
-                if dist > 0:
-                    move_vector = to_center * (dist - radius*0.9)/dist
-                    pose.translate(move_vector)
+                move_vector = center - centroid
+                pose.translate(move_vector)
+
                     
             # Filters for valid poses
             if not is_within_grid(pose, center, radius):
@@ -3289,6 +3310,35 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
                         individual.atoms[i]['coords'] = backup.atoms[i]['coords']
         
         return individual
+    def _generate_valid_pose(self, protein, ligand, center, radius):
+        pose = copy.deepcopy(ligand)
+
+        # Step 1: Center ligand to origin
+        centroid = np.mean(pose.xyz, axis=0)
+        pose.translate(-centroid)
+
+        # Step 2: Apply random rotation at origin
+        rotation_matrix = Rotation.random().as_matrix()
+        pose.rotate(rotation_matrix)
+
+        # Step 3: Sample a valid point within the search sphere
+        r = radius * random.random() ** (1.0/3.0)
+        theta = random.uniform(0, 2 * np.pi)
+        phi = random.uniform(0, np.pi)
+        x = r * np.sin(phi) * np.cos(theta)
+        y = r * np.sin(phi) * np.sin(theta)
+        z = r * np.cos(phi)
+
+        point_in_sphere = center + np.array([x, y, z])
+
+        # Step 4: Translate pose to point in sphere
+        pose.translate(point_in_sphere)
+
+        # Step 5: Validate pose
+        if self._check_pose_validity(pose, protein):
+            return pose
+        else:
+            return None
 
 
 # ------------------------------------------------------------------------------
