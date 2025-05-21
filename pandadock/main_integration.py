@@ -13,6 +13,17 @@ from .search import GeneticAlgorithm, RandomSearch
 from .parallel_search import ParallelGeneticAlgorithm, ParallelRandomSearch
 from .pandadock import PANDADOCKAlgorithm
 
+from .search import GeneticAlgorithm, RandomSearch
+from .parallel_search import (
+    ParallelSearch, 
+    ParallelGeneticAlgorithm, 
+    ParallelRandomSearch,
+    HybridSearch,
+    FlexibleLigandSearch,
+    create_search_algorithm
+)
+from .pandadock import PANDADOCKAlgorithm
+
 # Physics-based models
 from .physics import (
     MMFFMinimization,
@@ -61,50 +72,16 @@ def add_hardware_options(parser):
                          help='GPU/CPU workload balance (0.0-1.0, higher values assign more work to GPU)')
     hw_group.add_argument('--auto-tune', action='store_true',
                          help='Automatically tune hardware parameters for best performance')
+    
+    hw_group.add_argument('--hybrid-temperature-start', type=float, default=5.0,
+                         help='Starting temperature for hybrid search algorithm (default: 5.0)')
+    hw_group.add_argument('--hybrid-temperature-end', type=float, default=0.1,
+                         help='Ending temperature for hybrid search algorithm (default: 0.1)')
+    hw_group.add_argument('--hybrid-cooling-factor', type=float, default=0.95,
+                         help='Cooling factor for hybrid search algorithm (default: 0.95)')
+    hw_group.add_argument('--max-torsions', type=int, default=10,
+                         help='Maximum number of torsions to sample in flexible ligand docking (default: 10)')
 
-
-# def configure_hardware(args):
-#     """
-#     Configure hardware settings based on command-line arguments.
-    
-#     Parameters:
-#     -----------
-#     args : argparse.Namespace
-#         Command-line arguments
-    
-#     Returns:
-#     --------
-#     dict
-#         Hardware configuration dictionary
-#     """
-#     # Basic hardware configuration
-#     hw_config = {
-#         'use_gpu': args.use_gpu,
-#         'gpu_id': args.gpu_id,
-#         'gpu_precision': args.gpu_precision,
-#         'cpu_workers': args.cpu_workers,
-#     }
-    
-#     # Add optional workload balance if specified
-#     if args.workload_balance is not None:
-#         hw_config['workload_balance'] = max(0.0, min(1.0, args.workload_balance))
-    
-#     # Set CPU affinity if requested
-#     if args.cpu_affinity:
-#         try:
-#             import psutil
-#             process = psutil.Process()
-#             # Get available CPU cores
-#             cpu_count = psutil.cpu_count(logical=True)
-#             # Set affinity to all cores
-#             process.cpu_affinity(list(range(cpu_count)))
-#             print(f"CPU affinity set to {cpu_count} cores")
-#         except ImportError:
-#             print("Warning: psutil module not available, CPU affinity not set")
-#         except Exception as e:
-#             print(f"Warning: Failed to set CPU affinity: {e}")
-    
-#     return hw_config
 
 def configure_hardware(args):
     """
@@ -276,31 +253,6 @@ def setup_hardware_acceleration(hw_config):
     
     return manager
 
-
-# def create_optimized_scoring_function(args):
-#     """
-#     Create an optimized scoring function based on user arguments.
-#     Automatically selects CPU/GPU/physics-based implementation.
-#     """
-#     try:
-#         scoring_function = create_scoring_function(
-#             use_gpu=getattr(args, 'use_gpu', False),
-#             physics_based=getattr(args, 'physics_based', False),
-#             enhanced=getattr(args, 'enhanced_scoring', True),
-#             tethered=getattr(args, 'tethered_scoring', False),
-#             reference_ligand=getattr(args, 'reference_ligand', None),
-#             weights=getattr(args, 'scoring_weights', None),
-#             device=getattr(args, 'gpu_device', 'cuda'),
-#             precision=getattr(args, 'gpu_precision', 'float32'),
-#             verbose=getattr(args, 'verbose', False)
-#         )
-#         print(f"[DEBUG] Created scoring function: {type(scoring_function).__name__}")
-#         return scoring_function
-
-#     except Exception as e:
-#         print("[ERROR] Could not initialize physics-based scoring:", str(e))
-#         print("Warning: Physics-based modules not available. Some features will be disabled.")
-#         return create_scoring_function()
     
 def create_optimized_scoring_function(args):
     """
@@ -387,7 +339,6 @@ def create_optimized_scoring_function(args):
         from .scoring_factory import create_scoring_function
         return create_scoring_function()
 
-
 def create_optimized_search_algorithm(manager, algorithm_type, scoring_function, **kwargs):
     """
     Create an optimized search algorithm based on available hardware.
@@ -397,7 +348,7 @@ def create_optimized_search_algorithm(manager, algorithm_type, scoring_function,
     manager : HybridDockingManager
         Manager for hybrid CPU/GPU acceleration
     algorithm_type : str
-        Type of search algorithm ('genetic', 'random', 'monte-carlo', 'pandadock')
+        Type of search algorithm ('genetic', 'random', 'monte-carlo', 'pandadock', 'hybrid', 'flexible')
     scoring_function : ScoringFunction
         Scoring function for pose evaluation
     **kwargs : dict
@@ -417,38 +368,54 @@ def create_optimized_search_algorithm(manager, algorithm_type, scoring_function,
     # EXPLICITLY GET use_gpu from kwargs or manager
     use_gpu = kwargs.get('use_gpu', getattr(manager, 'use_gpu', False))
 
-    # CRITICAL: Add this print statement for debugging
-    print(f"DEBUG: create_optimized_search_algorithm received use_gpu={use_gpu}")
-
-    # AUTO-SELECT PARALLEL IMPLEMENTATIONS
+    # Get CPU workers count
     cpu_workers = kwargs.get('cpu_workers', None)
-    # use_gpu = kwargs.get('use_gpu', False)
-    
-    # Determine parallelization strategy
-    use_parallel = (cpu_workers is not None and cpu_workers > 1) or use_gpu
-    
     if cpu_workers is None:
-        cpu_workers = manager.n_cpu_workers
+        cpu_workers = getattr(manager, 'n_cpu_workers', None)
     if cpu_workers is None:
         cpu_workers = os.cpu_count() or 1
-    if cpu_workers > 1:
-        use_parallel = True
-    else:
-        use_parallel = False
         
     # Log hardware usage info
     if use_gpu:
         print(f"[INFO] Using GPU acceleration for '{algorithm_type}'")
     else:
         print(f"[INFO] Using CPU acceleration for '{algorithm_type}'")
+    
+    # Use the new factory function if algorithm is one of the new types
+    if algorithm_type in ['hybrid', 'flexible']:
+        # Configure parameters for create_search_algorithm
+        search_params = {
+            'scoring_function': scoring_function,
+            'max_iterations': kwargs.get('max_iterations', 100),
+            'output_dir': output_dir,
+            'grid_spacing': grid_spacing,
+            'grid_radius': grid_radius,
+            'grid_center': grid_center,
+            'n_processes': cpu_workers,
+        }
         
-    if use_parallel:
-        print(f"[INFO] Using parallel implementation for '{algorithm_type}' with {cpu_workers} CPU workers")
-    else:
-        print(f"[INFO] Using serial implementation for '{algorithm_type}'")
-
-    # Select appropriate algorithm implementation based on type and hardware
-    if algorithm_type == 'genetic':
+        # Add algorithm-specific parameters
+        if algorithm_type in ['hybrid', 'flexible', 'genetic']:
+            search_params['population_size'] = kwargs.get('population_size', 50)
+            search_params['mutation_rate'] = kwargs.get('mutation_rate', 0.3)
+            search_params['crossover_rate'] = kwargs.get('crossover_rate', 0.8)
+            
+        if algorithm_type in ['hybrid', 'flexible']:
+            search_params['temperature_start'] = kwargs.get('high_temp', 5.0)
+            search_params['temperature_end'] = kwargs.get('target_temp', 0.1)
+            search_params['cooling_factor'] = kwargs.get('cooling_factor', 0.95)
+            search_params['local_opt_frequency'] = 5
+            
+        if algorithm_type == 'flexible':
+            search_params['max_torsions'] = kwargs.get('max_torsions', 10)
+            search_params['torsion_step'] = 15.0
+            
+        # Create the algorithm using the factory function
+        from .parallel_search import create_search_algorithm
+        return create_search_algorithm(algorithm_type, **search_params)
+    
+    # For existing algorithm types, keep the current implementation with minor improvements
+    elif algorithm_type == 'genetic':
         if use_gpu:  # GPU-accelerated genetic algorithm
             try:
                 from .gpu_search import ParallelGeneticAlgorithm
@@ -464,110 +431,83 @@ def create_optimized_search_algorithm(manager, algorithm_type, scoring_function,
                 print(f"[WARNING] GPU-accelerated genetic algorithm not available: {e}")
                 print("[INFO] Falling back to CPU parallel implementation")
                 use_gpu = False
-                use_parallel = True
                 
-        if use_parallel:  # CPU parallel genetic algorithm
-            from .parallel_search import ParallelGeneticAlgorithm
-            # Remove irrelevant kwargs
-            for key in ['n_steps', 'temperature', 'cooling_factor', 'high_temp', 'target_temp',
-                        'num_conformers', 'num_orientations', 'md_steps', 'minimize_steps',
-                        'use_grid', 'use_monte_carlo']:
-                kwargs.pop(key, None)
-            return ParallelGeneticAlgorithm(
-                scoring_function=scoring_function,
-                grid_spacing=grid_spacing,
-                grid_radius=grid_radius,
-                grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
-            )
-        else:  # Serial genetic algorithm
-            from .search import GeneticAlgorithm
-            return GeneticAlgorithm(
-                scoring_function=scoring_function,
-                grid_spacing=grid_spacing,
-                grid_radius=grid_radius,
-                grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
-            )
+        # Use the new ParallelGeneticAlgorithm from optimized parallel_search.py
+        from .parallel_search import ParallelGeneticAlgorithm
+        return ParallelGeneticAlgorithm(
+            scoring_function=scoring_function,
+            grid_spacing=grid_spacing,
+            grid_radius=grid_radius,
+            grid_center=grid_center,
+            output_dir=output_dir,
+            max_iterations=kwargs.get('max_iterations', 100),
+            population_size=kwargs.get('population_size', 50),
+            mutation_rate=kwargs.get('mutation_rate', 0.3),
+            n_processes=cpu_workers,
+            **kwargs
+        )
 
     elif algorithm_type == 'random':
-        if use_gpu:  # GPU-accelerated random search (not implemented yet)
-            print("[WARNING] GPU acceleration not implemented for random search algorithm")
-            print("[INFO] Falling back to CPU parallel implementation")
-            use_gpu = False
-            use_parallel = True
-            
-        if use_parallel:  # CPU parallel random search
-            from .parallel_search import ParallelRandomSearch
-            return ParallelRandomSearch(
-                scoring_function=scoring_function,
-                grid_spacing=grid_spacing,
-                grid_radius=grid_radius,
-                grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
-            )
-        else:  # Serial random search
-            from .search import RandomSearch
-            return RandomSearch(
-                scoring_function=scoring_function,
-                grid_spacing=grid_spacing,
-                grid_radius=grid_radius,
-                grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
-            )
+        # Use the new ParallelRandomSearch from optimized parallel_search.py
+        from .parallel_search import ParallelRandomSearch
+        return ParallelRandomSearch(
+            scoring_function=scoring_function,
+            grid_spacing=grid_spacing,
+            grid_radius=grid_radius,
+            grid_center=grid_center,
+            output_dir=output_dir,
+            max_iterations=kwargs.get('max_iterations', 100),
+            n_processes=cpu_workers,
+            **kwargs
+        )
             
     # Monte Carlo sampling
     elif algorithm_type == 'monte-carlo':
         try:
-            from .physics import MonteCarloSampling
-            # Remove unsupported kwargs
-            kwargs.pop('grid_radius', None)
-            kwargs.pop('grid_spacing', None)
-            kwargs.pop('grid_center', None)
-            kwargs.pop('max_iterations', None)
-            kwargs.pop('workload_balance', None)            
-            kwargs.pop('num_processes', None)
-            kwargs.pop('output_dir', None)
-            kwargs.pop('mc_steps', None)
-            kwargs.pop('temperature', None)
-            
-            return MonteCarloSampling(
+            # First try to use the HybridSearch which is better
+            from .parallel_search import HybridSearch
+            return HybridSearch(
                 scoring_function=scoring_function,
+                max_iterations=kwargs.get('mc_steps', 1000),
+                output_dir=output_dir,
                 grid_spacing=grid_spacing,
                 grid_radius=grid_radius,
                 grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
+                temperature_start=kwargs.get('temperature', 5.0),
+                temperature_end=0.1,
+                cooling_factor=kwargs.get('cooling_factor', 0.95),
+                n_processes=cpu_workers
             )
         except ImportError as e:
-            print(f"[WARNING] Monte Carlo sampling not available: {e}")
-            print("[INFO] Falling back to genetic algorithm")
-            return create_optimized_search_algorithm(
-                manager,
-                'genetic',
-                scoring_function,
-                grid_spacing=grid_spacing,
-                grid_radius=grid_radius,
-                grid_center=grid_center,
-                output_dir=output_dir,
-                **kwargs
-            )
+            # Fall back to original physics module if available
+            try:
+                from .physics import MonteCarloSampling
+                return MonteCarloSampling(
+                    scoring_function=scoring_function,
+                    grid_spacing=grid_spacing,
+                    grid_radius=grid_radius,
+                    grid_center=grid_center,
+                    output_dir=output_dir,
+                    **kwargs
+                )
+            except ImportError as e:
+                print(f"[WARNING] Monte Carlo sampling not available: {e}")
+                print("[INFO] Falling back to genetic algorithm")
+                return create_optimized_search_algorithm(
+                    manager,
+                    'genetic',
+                    scoring_function,
+                    grid_spacing=grid_spacing,
+                    grid_radius=grid_radius,
+                    grid_center=grid_center,
+                    output_dir=output_dir,
+                    **kwargs
+                )
             
     # PANDADOCK algorithm
     elif algorithm_type == 'pandadock':
         try:
             from .pandadock import PANDADOCKAlgorithm
-            
-            # Remove unsupported kwargs
-            kwargs.pop('grid_radius', None)
-            kwargs.pop('grid_spacing', None)
-            kwargs.pop('grid_center', None)
-            kwargs.pop('output_dir', None)
-
             return PANDADOCKAlgorithm(
                 scoring_function=scoring_function,
                 output_dir=output_dir,
@@ -602,181 +542,6 @@ def create_optimized_search_algorithm(manager, algorithm_type, scoring_function,
             **kwargs
         )
 
-# def create_optimized_search_algorithm(manager, algorithm_type, scoring_function, **kwargs):
-#     """
-#     Create an optimized search algorithm based on available hardware.
-#     """
-#     # Extract grid-related settings from kwargs
-#     grid_spacing = kwargs.pop('grid_spacing', 0.375)
-#     grid_radius = kwargs.pop('grid_radius', 10.0)
-#     grid_center = kwargs.pop('grid_center', None)
-#     output_dir = kwargs.pop('output_dir', None)
-
-#     # AUTO-SELECT PARALLEL IMPLEMENTATIONS
-#     cpu_workers = kwargs.get('cpu_workers', None)
-#     use_gpu = kwargs.get('use_gpu', False)
-#     use_parallel = (cpu_workers is not None and cpu_workers > 1) or use_gpu
-#     if cpu_workers is None:
-#         cpu_workers = manager.n_cpu_workers
-#     if cpu_workers is None:
-#         cpu_workers = os.cpu_count() or 1
-#     if cpu_workers > 1:
-#         use_parallel = True
-#     else:
-#         use_parallel = False
-#     # Check if GPU is available
-#     if use_gpu:
-#         print(f"[INFO] Using GPU acceleration for '{algorithm_type}'")
-#     else:
-#         print(f"[INFO] Using CPU acceleration for '{algorithm_type}'")
-#     # Check if parallel implementation is available
-#     if use_parallel:
-#         print(f"[INFO] Using parallel implementation for '{algorithm_type}' with {cpu_workers} CPU workers")
-#     else:
-#         print(f"[INFO] Using serial implementation for '{algorithm_type}'")
-
-#     # ----------------------------------------------------
-#     if algorithm_type == 'genetic':
-#         if use_gpu:  # Check if GPU is enabled
-#             # Import GPU-specific genetic algorithm implementation
-#             from .gpu_search import ParallelGeneticAlgorithm
-#             return ParallelGeneticAlgorithm(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,
-#                 grid_radius=grid_radius,
-#                 grid_center=grid_center,
-#                 output_dir=output_dir,
-#                 **kwargs            
-#             )
-#         elif use_parallel:  # Check if parallel implementation is enabled and GPU is not used. if use_parallel:
-#             from .parallel_search import ParallelGeneticAlgorithm
-#             # Remove irrelevant kwargs
-#             for key in ['n_steps', 'temperature', 'cooling_factor', 'high_temp', 'target_temp',
-#                         'num_conformers', 'num_orientations', 'md_steps', 'minimize_steps',
-#                         'use_grid', 'use_monte_carlo']:
-#                 kwargs.pop(key, None)
-#             return ParallelGeneticAlgorithm(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,
-#                 grid_radius=grid_radius,
-#                 grid_center=grid_center,
-#                 output_dir=output_dir,
-#                 **kwargs
-#             )
-#         else:
-#             from .search import GeneticAlgorithm
-#             return GeneticAlgorithm(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,
-#                 grid_radius=grid_radius,
-#                 grid_center=grid_center,
-#                 output_dir=output_dir,
-#                 **kwargs
-#             )
-
-#     elif algorithm_type == 'random':
-#         if use_parallel:
-#             from .parallel_search import ParallelRandomSearch
-#             return ParallelRandomSearch(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,
-#                 grid_radius=grid_radius,
-#                 grid_center=grid_center,
-#                 output_dir=output_dir,
-#                 **kwargs
-#             )
-#         else:
-#             from .search import RandomSearch
-#             return RandomSearch(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,
-#                 grid_radius=grid_radius,
-#                 grid_center=grid_center,
-#                 output_dir=output_dir,
-#                 **kwargs
-#             )
-#     # ----------------------------------------------------
-#     # Add support for Monte Carlo sampling
-#     # ----------------------------------------------------
-#     elif algorithm_type == 'monte-carlo':
-#         try:
-#             from .unified_scoring import MonteCarloSampling
-#              # Remove unsupported kwargs for this algorithm
-#             kwargs.pop('grid_radius', None)
-#             kwargs.pop('grid_spacing', None)
-#             kwargs.pop('grid_center', None)
-#             kwargs.pop('max_iterations', None)
-#             kwargs.pop('workload_balance', None)            
-#             kwargs.pop('num_processes', None)
-#             kwargs.pop('output_dir', None)
-#             kwargs.pop('mc_steps', None)
-#             kwargs.pop('temperature', None)
-#             return MonteCarloSampling(
-#                 scoring_function=scoring_function,
-#                 grid_spacing=grid_spacing,  # Pass grid_spacing explicitly
-#                 grid_radius=grid_radius,    # 💥 PASS properl
-#                 grid_center=grid_center,     # 💥 PASS proper
-#                 output_dir=kwargs.pop('output_dir', None),
-#                 **kwargs
-#             )
-#         except ImportError:
-#             print("Monte Carlo sampling not available. Using genetic algorithm instead.")
-#             return create_optimized_search_algorithm(
-#                 manager,
-#                 'genetic',
-#                 scoring_function,
-#                 grid_spacing=grid_spacing,  # Pass grid_spacing explicitly
-#                 grid_radius=grid_radius,    # 💥 PASS properly
-#                 grid_center=grid_center,     # 💥 PASS properly
-#                 output_dir=kwargs.pop('output_dir', None),
-#                 **kwargs
-#             )
-            
-#     elif algorithm_type == 'pandadock':
-#         try:
-#             from .pandadock import PANDADOCKAlgorithm
-            
-#             # Remove unsupported kwargs for this algorithm
-#             kwargs.pop('grid_radius', None)
-#             kwargs.pop('grid_spacing', None)
-#             kwargs.pop('grid_center', None)
-#             kwargs.pop('output_dir', None)
-
-#             return PANDADOCKAlgorithm(
-#                 scoring_function=scoring_function,
-#                 output_dir=kwargs.pop('output_dir', None),
-#                 **kwargs
-#             )
-#         ##############
-#         # Add exception handling for PANDADOCK
-#         ##############
-
-#         except ImportError:
-#             print("PANDADOCK algorithm not available. Using genetic algorithm instead.")
-#             return create_optimized_search_algorithm(
-#                 manager,
-#                 'genetic',
-#                 scoring_function,
-#                 grid_spacing=grid_spacing,  # Pass grid_spacing explicitly
-#                 grid_radius=grid_radius,    # 💥 PASS properly
-#                 grid_center=grid_center,     # 💥 PASS properly
-#                 output_dir=kwargs.pop('output_dir', None),
-#                 **kwargs
-#             )
-    
-#     # Unknown algorithm type
-#     else:
-#         print(f"Unknown algorithm type: {algorithm_type}. Using genetic algorithm.")
-#         return create_optimized_search_algorithm(
-#             manager,
-#             'genetic',
-#             scoring_function,
-#             grid_spacing=grid_spacing,  # Pass grid_spacing explicitly
-#             grid_radius=grid_radius,    # 💥 PASS properl
-#             grid_center=grid_center,     # 💥 PASS property
-#             output_dir=kwargs.pop('output_dir', None),
-#             **kwargs
-#         )
 def get_scoring_type_from_args(args):
     """
     Determine scoring type based on command-line arguments.
@@ -809,13 +574,16 @@ def get_algorithm_type_from_args(args):
     Returns:
     --------
     str
-        Algorithm type ('genetic', 'random', 'monte-carlo', or 'pandadock')
+        Algorithm type ('genetic', 'random', 'monte-carlo', 'pandadock', 'hybrid', or 'flexible')
     """
-    if args.monte_carlo:
+    if hasattr(args, 'flexible') and args.flexible:
+        return 'flexible'
+    elif hasattr(args, 'hybrid') and args.hybrid:
+        return 'hybrid'
+    elif hasattr(args, 'monte_carlo') and args.monte_carlo:
         return 'monte-carlo'
     else:
-        return args.algorithm  # Now can include 'pandadock' as an option
-    
+        return getattr(args, 'algorithm', 'genetic')  # Default to genetic
 
 
 def get_algorithm_kwargs_from_args(args):

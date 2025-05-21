@@ -28,7 +28,16 @@ from .unified_scoring import (
     EnhancedGPUScoringFunction,
     TetheredScoringFunction,
 )
-
+from .search import GeneticAlgorithm, RandomSearch
+from .parallel_search import (
+    ParallelSearch, 
+    ParallelGeneticAlgorithm, 
+    ParallelRandomSearch,
+    HybridSearch,
+    FlexibleLigandSearch,
+    create_search_algorithm
+)
+from .pandadock import PANDADOCKAlgorithm
 # Physics-based modules
 from .physics import (
     MMFFMinimization,
@@ -515,8 +524,14 @@ def main():
         parser.add_argument('--verbose', action='store_true', help='Enable verbose output')
         parser.add_argument('--log-file', type=str, default='pandadock.log', help='Log file for verbose output')
         parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
-        parser.add_argument('-a', '--algorithm', choices=['random', 'genetic', 'pandadock'], default='genetic',
-                            help='Docking algorithm to use (default: genetic)')
+        parser.add_argument('-a', '--algorithm', 
+                    choices=['random', 'genetic', 'pandadock', 'hybrid', 'flexible'], 
+                    default='genetic',
+                    help='Docking algorithm to use (default: genetic)')
+        parser.add_argument('--hybrid', action='store_true',
+                            help='Use hybrid search algorithm (combines GA, SA, and MC)')
+        parser.add_argument('--flexible', action='store_true',
+                            help='Enable flexible ligand docking')
         parser.add_argument('-i', '--iterations', type=int, default=10,
                             help='Number of iterations/generations (default: 10)')
         
@@ -1009,6 +1024,16 @@ def main():
         if hasattr(search_algorithm, 'output_dir'):
             search_algorithm.output_dir = output_dir
         
+        if algorithm_type in ['hybrid', 'flexible']:
+        # Add specific parameters for new algorithms
+            if algorithm_type == 'hybrid':
+                algorithm_kwargs['high_temp'] = getattr(args, 'hybrid_temperature_start', 5.0)
+                algorithm_kwargs['target_temp'] = getattr(args, 'hybrid_temperature_end', 0.1)
+                algorithm_kwargs['cooling_factor'] = getattr(args, 'hybrid_cooling_factor', 0.95)
+            
+            if algorithm_type == 'flexible':
+                algorithm_kwargs['max_torsions'] = getattr(args, 'max_torsions', 10)
+                algorithm_kwargs['torsion_step'] = 15.0 # Fixed for flexible ligand search
         # Run the appropriate docking algorithm
         if args.reference and args.tethered_docking:
             logger.info(f"Using tethered reference-based docking with weight {args.tether_weight}...")
