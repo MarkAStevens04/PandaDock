@@ -58,7 +58,7 @@ from .utils import (
 # Performance-critical functions with JIT compilation
 # ------------------------------------------------------------------------------
 
-@jit(nopython=True, parallel=True, fastmath=True)
+@jit(nopython=True, fastmath=True)
 def fast_clash_detection(ligand_coords, protein_coords, clash_threshold=1.5):
     """
     Fast clash detection using Numba JIT compilation.
@@ -2908,7 +2908,18 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
         self.grid_radius = grid_radius
         self.grid_center = grid_center
         self.grid_points = None
-        
+
+        # Set up logging
+        if output_dir:
+            self.logger = setup_logging(output_dir)
+        else:
+            import logging
+            self.logger = logging.getLogger("hybrid_search")
+            self.logger.setLevel(logging.INFO)
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+            self.logger.addHandler(handler)
+
         # Simulated annealing parameters
         self.temperature_start = temperature_start
         self.temperature_end = temperature_end
@@ -2944,17 +2955,6 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
         self.total_time = 0.0
         self.best_score = float('inf')
         self.best_pose = None
-        
-        # Set up logging
-        if output_dir:
-            self.logger = setup_logging(output_dir)
-        else:
-            import logging
-            self.logger = logging.getLogger("hybrid_search")
-            self.logger.setLevel(logging.INFO)
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-            self.logger.addHandler(handler)
     
     def _initialize_population(self, protein, ligand, center, radius):
         """
@@ -3163,6 +3163,9 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
         population.sort(key=lambda x: x[1])
         
         # Update best solution
+        if not population:
+            self.logger.error("No valid poses found during population initialization.")
+            return []
         self.best_pose = population[0][0]
         self.best_score = population[0][1]
         
@@ -3783,7 +3786,7 @@ class FlexibleLigandSearch(HybridSearch):
         rotatable_bonds = self._identify_rotatable_bonds(ligand)
         
         # Generate a valid rigid pose first
-        rigid_pose = super()._generate_valid_pose(protein, ligand, center, radius, max_attempts)
+        rigid_pose = super()._generate_valid_pose(protein, ligand, center, radius)
         
         # If no rotatable bonds or rigid pose generation failed, return rigid pose
         if not rotatable_bonds or rigid_pose is None:

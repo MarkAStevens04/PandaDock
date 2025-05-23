@@ -534,6 +534,9 @@ def create_optimized_search_algorithm(manager, algorithm_type, scoring_function,
         if algorithm_type == 'hybrid':
             return HybridSearch(**search_params)
         elif algorithm_type == 'flexible':
+            # Remove GPU-related keys not accepted by FlexibleLigandSearch
+            for key in ['use_gpu', 'gpu_device', 'gpu_provider']:
+                search_params.pop(key, None)
             return FlexibleLigandSearch(**search_params)
     
     else:
