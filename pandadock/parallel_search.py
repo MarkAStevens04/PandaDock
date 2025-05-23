@@ -2395,6 +2395,14 @@ class ParallelRandomSearch(RandomSearch, GridUtilsMixin, ClashDetectionMixin, Po
         self.grid_center = grid_center
         self.grid_points = None
 
+        # Set up logging
+        if output_dir:
+            self.logger = setup_logging(output_dir)
+        else:
+            import logging
+            self.logger = logging.getLogger("null_logger")
+            self.logger.addHandler(logging.NullHandler())
+
         # GPU configuration
         self.use_gpu = use_gpu
         self.gpu_device = gpu_device
