@@ -31,6 +31,7 @@ from .main_integration import (
     create_optimized_search_algorithm,
     get_algorithm_kwargs_from_args
 )
+from .main_integration import setup_hardware_acceleration
 
 
 # Global variable to store shared configuration for multiprocessing
