@@ -107,7 +107,7 @@ class GPUDockingSearch(DockingSearch):
         except ImportError:
             print("PyTorch not available. Trying CuPy...")
             self.device = torch.device('cpu')
-            print("GPU not available or not requested. Using CPU via PyTorch.")
+            #print("GPU not available or not requested. Using CPU via PyTorch.")
             if self.precision == 'float64':
                 torch.set_default_tensor_type(torch.DoubleTensor)
             

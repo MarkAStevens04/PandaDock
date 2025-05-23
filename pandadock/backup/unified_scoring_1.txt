@@ -1,0 +1,332 @@
+# unified_scoring.py – **full production build**
+"""A self‑contained scoring engine with identical public API across CPU/GPU.
+
+* A concrete `CPUEngine` holds the authoritative NumPy physics.
+* `GPUEngine` supplies high‑throughput Torch kernels but falls back gracefully.
+* `CompositeScoring` adds weights; `EnhancedScoring` just tweaks them.
+* A `TetheredScoringFunction` wraps any base scorer with an RMSD restraint.
+
+Public surface
+--------------
+```python
+scorer = EnhancedScoring()                 # CPU
+# scorer = GPUCompositeScoring()           # GPU (Torch) if available
+score   = scorer.score(protein, ligand)
+parts   = scorer.get_component_scores(protein, ligand)
+```
+Every call‑site stays identical no matter which backend you drop in.
+"""
+from __future__ import annotations
+
+import math, warnings, numpy as np
+from typing import Dict, List
+
+# --------------------------------- stubs ----------------------------------
+class Atom(dict): ...  # just a Dict[ str, Any ] with keys 'coords' (np.ndarray,3) & 'element'
+class Protein: atoms: List[Atom]; active_site: Dict[str, List[Atom]]|None = None
+class Ligand:  atoms: List[Atom]; xyz: np.ndarray; rotatable_bonds: List[int]
+
+# ==========================================================================
+#  core scaffolding
+# ==========================================================================
+class ScoringFunction:
+    """Common parameters & helpers – **never instantiate directly**."""
+
+        # ------------- atom helpers -------------
+    def _element(self, atom: dict) -> str:
+        """
+        Return an element symbol for an atom-dict, trying several fall-backs.
+        """
+        if 'element' in atom:        # normal case
+            return atom['element']
+        if 'symbol' in atom:         # RDKit style
+            return atom['symbol']
+        if 'type' in atom:           # some toolkits
+            return atom['type']
+        if 'name' in atom:           # PDB atom name, e.g.  ' CA '
+            # first 2 alphabetic chars give the element
+            import re
+            m = re.match(r'\s*([A-Za-z]{1,2})', atom['name'])
+            if m:
+                return m.group(1).title()
+        # default → carbon
+        return 'C'
+
+    # ---------------- constants ----------------
+    vdw_radii: Dict[str,float] = {'H':1.2,'C':1.7,'N':1.55,'O':1.52,'S':1.8,
+                                  'P':1.8,'F':1.47,'Cl':1.75,'Br':1.85,'I':1.98}
+    atom_charges: Dict[str,float] = {'H':0.0,'C':0.0,'N':-0.4,'O':-0.4,'S':-0.15,
+                                     'P':0.4,'F':-0.2,'Cl':-0.08,'Br':-0.08,'I':-0.08}
+    vdw_cutoff=8.0; hbond_cutoff=3.5; electro_cutoff=20.0; hydrophobic_cutoff=5.0
+
+    weights: Dict[str,float] = {
+        'vdw':1.0,'hbond':1.0,'elec':1.0,'desolv':1.0,
+        'hydrophobic':1.0,'clash':1.0,'entropy':0.25}
+
+    verbose=False
+
+    # ------------- public interface -------------
+    def calculate_vdw(self, p:Protein, l:Ligand):          return self._vdw_impl (self._p_atoms(p), self._l_atoms(l))
+    def calculate_hbond(self, p:Protein, l:Ligand):        return self._hbond_impl(self._p_atoms(p), self._l_atoms(l))
+    def calculate_electrostatics(self, p:Protein, l:Ligand):return self._elec_impl(self._p_atoms(p), self._l_atoms(l))
+    def calculate_desolvation(self, p:Protein, l:Ligand):  return self._desolv_impl(self._p_atoms(p), self._l_atoms(l))
+    def calculate_hydrophobic(self, p:Protein, l:Ligand):  return self._hydro_impl(self._p_atoms(p), self._l_atoms(l))
+    def calculate_clashes(self, p:Protein, l:Ligand):      return self._clash_impl(self._p_atoms(p), self._l_atoms(l))
+    def calculate_entropy(self, p:Protein, l:Ligand):      return self._entropy_impl(l, p)
+
+    # ------------- composite score --------------
+    def score(self, p:Protein, l:Ligand):
+        vdw,hb,el,ds,hy,cl,en = (
+            self.calculate_vdw(p,l), self.calculate_hbond(p,l), self.calculate_electrostatics(p,l),
+            self.calculate_desolvation(p,l), self.calculate_hydrophobic(p,l),
+            self.calculate_clashes(p,l), self.calculate_entropy(p,l))
+        return (self.weights['vdw']*vdw + self.weights['hbond']*hb + self.weights['elec']*el +
+                self.weights['desolv']*ds + self.weights['hydrophobic']*hy -
+                self.weights['clash']*cl - self.weights['entropy']*en)
+
+    # ------------- breakdown helper ------------
+    def get_component_scores(self, p:Protein, l:Ligand):
+        comps = {'Van der Waals':self.calculate_vdw(p,l),
+                 'H-Bond':self.calculate_hbond(p,l),
+                 'Electrostatic':self.calculate_electrostatics(p,l),
+                 'Desolvation':self.calculate_desolvation(p,l),
+                 'Hydrophobic':self.calculate_hydrophobic(p,l),
+                 'Clash':self.calculate_clashes(p,l),
+                 'Entropy':self.calculate_entropy(p,l)}
+        comps['Total']=self.score(p,l); return comps
+
+    # ------------- internal helpers ------------
+    def _p_atoms(self, p:Protein):
+        return p.active_site.get('atoms',p.atoms) if getattr(p,'active_site',None) else p.atoms
+    def _l_atoms(self, l:Ligand): return l.atoms
+
+    # ------------- impl stubs ------------------
+    def _vdw_impl(self, pa,la):       raise NotImplementedError
+    def _hbond_impl(self, pa,la):     raise NotImplementedError
+    def _elec_impl(self, pa,la):      raise NotImplementedError
+    def _desolv_impl(self, pa,la):    raise NotImplementedError
+    def _hydro_impl(self, pa,la):     raise NotImplementedError
+    def _clash_impl(self, pa,la):     raise NotImplementedError
+    def _entropy_impl(self, l, p):    raise NotImplementedError
+
+    # ---------------- utils --------------------
+    def _dist(self,a,b): return np.linalg.norm(a-b)
+
+# ==========================================================================
+#  CPU engine – detailed physics (ported from your original code)
+# ==========================================================================
+class CPUEngine(ScoringFunction):
+    """Authoritative NumPy implementation of every energy term."""
+
+    # ---- van der Waals ----------------------------------------------------
+    def _vdw_impl(self, pa, la):
+        e=0.0
+        for p in pa:
+            p_r = self.vdw_radii.get(p['element'],1.7)
+            p_c = p['coords']
+            for l in la:
+                d = self._dist(p_c, l['coords'])
+                if d>self.vdw_cutoff: continue
+                l_r = self.vdw_radii.get(l['element'],1.7)
+                r_eq = p_r + l_r
+                if d<0.1: d=0.1
+                ratio = r_eq/d
+                if d>=0.7*r_eq:
+                    term = (ratio**12 - 2*ratio**6)
+                else:
+                    term = 50.0*(0.7*r_eq - d)/(0.7*r_eq)
+                e += max(-50.0, min(50.0, term))
+        return e
+
+    # ---- hydrogen bonds ---------------------------------------------------
+    def _hbond_impl(self, pa, la):
+        donors = {'N','O','S'}; acc = donors
+        e=0.0
+        for p in pa:
+            if p['element'] not in donors: continue
+            for l in la:
+                if l['element'] not in acc: continue
+                d=self._dist(p['coords'], l['coords'])
+                if d>self.hbond_cutoff: continue
+                e -= math.exp(-(d-2.8)**2/0.3)
+        return e
+
+    # ---- electrostatics ---------------------------------------------------
+    def _elec_impl(self, pa, la):
+        k=332.0; eps_r=80.0; e=0.0
+        for p in pa:
+            q1=self.atom_charges.get(p['element'],0.0)
+            if q1==0: continue
+            for l in la:
+                q2=self.atom_charges.get(l['element'],0.0)
+                if q2==0: continue
+                d=self._dist(p['coords'], l['coords'])
+                if d>self.electro_cutoff or d<0.1: continue
+                e+=k*q1*q2/(eps_r*d)
+        return e
+
+    # ---- desolvation (simple burial penalty) -----------------------------
+    def _desolv_impl(self, pa, la):
+        polar={'N','O','S','P'}; e=0.0
+        for l in la:
+            if l['element'] not in polar: continue
+            buried = any(self._dist(l['coords'], p['coords'])<4.0 for p in pa)
+            if buried: e += 1.0
+        return e*0.5
+
+    # ---- hydrophobic ------------------------------------------------------
+    def _hydro_impl(self, pa, la):
+        hydro={'C'}; score=0.0
+        for p in pa:
+            if p['element']!='C': continue
+            for l in la:
+                if l['element']!='C': continue
+                d=self._dist(p['coords'], l['coords'])
+                if d<self.hydrophobic_cutoff:
+                    score -= (self.hydrophobic_cutoff-d)/self.hydrophobic_cutoff
+        return score
+
+    # ---- steric clashes ---------------------------------------------------
+    def _clash_impl(self, pa, la):
+        pen=0.0
+        for p in pa:
+            p_r=self.vdw_radii.get(p['element'],1.7)
+            for l in la:
+                l_r=self.vdw_radii.get(l['element'],1.7)
+                min_d=0.7*(p_r+l_r)
+                d=self._dist(p['coords'], l['coords'])
+                if d<min_d:
+                    pen += ((min_d-d)/min_d)**2
+        return pen
+
+    # ---- entropy (rotatable bonds) ---------------------------------------
+    def _entropy_impl(self, ligand:Ligand, protein:Protein):
+        return 0.5*len(getattr(ligand,'rotatable_bonds',[]))
+
+# ==========================================================================
+#  GPU engine – Torch overrides (vectorised, same physics)
+# ==========================================================================
+class GPUEngine(CPUEngine):
+    def __init__(self, device='cuda'):
+        super().__init__()
+        try:
+            import torch; self.torch=torch
+            self.device=self.torch.device(device if self.torch.cuda.is_available() else 'cpu')
+            self._gpu=True
+        except ImportError:
+            warnings.warn('Torch not found, GPU path disabled'); self._gpu=False
+
+    # ---------------- helper ------------------
+    def _to_tensor(self, coords):
+        import torch
+        return torch.tensor(coords, device=self.device)
+
+    # ---- van der Waals ----------------------------------------------------
+    def _vdw_impl(self, pa, la):
+        if not self._gpu: return super()._vdw_impl(pa,la)
+        torch=self.torch
+        p_xyz=self._to_tensor([a['coords'] for a in pa])
+        l_xyz=self._to_tensor([a['coords'] for a in la])
+        d=torch.cdist(p_xyz,l_xyz)
+        p_r=torch.tensor([self.vdw_radii.get(a['element'],1.7) for a in pa], device=self.device).unsqueeze(1)
+        l_r=torch.tensor([self.vdw_radii.get(a['element'],1.7) for a in la], device=self.device).unsqueeze(0)
+        r_eq=p_r+l_r
+        safe_d=torch.clamp(d,min=0.1)
+        ratio=r_eq/safe_d
+        lj=torch.where(safe_d>=0.7*r_eq, ratio**12-2*ratio**6, 50.0*(0.7*r_eq-safe_d)/(0.7*r_eq))
+        lj=torch.clamp(lj,-50.0,50.0)
+        lj[d>self.vdw_cutoff]=0.0
+        return lj.sum().item()
+
+    # ---- hydrogen bonds ---------------------------------------------------
+    def _hbond_impl(self, pa, la):
+        if not self._gpu: return super()._hbond_impl(pa,la)
+        torch=self.torch; donors={'N','O','S'}
+        p_idx=[i for i,a in enumerate(pa) if a['element'] in donors]
+        l_idx=[i for i,a in enumerate(la) if a['element'] in donors]
+        if not p_idx or not l_idx: return 0.0
+        p_xyz=self._to_tensor([pa[i]['coords'] for i in p_idx])
+        l_xyz=self._to_tensor([la[i]['coords'] for i in l_idx])
+        d=torch.cdist(p_xyz,l_xyz)
+        mask=d<self.hbond_cutoff
+        hbond=-torch.exp(-(d-2.8)**2/0.3)*mask.float()
+        return hbond.sum().item()
+
+    # ---- electrostatics ---------------------------------------------------
+    def _elec_impl(self, pa, la):
+        if not self._gpu: return super()._elec_impl(pa,la)
+        torch=self.torch; k=332.0; eps_r=80.0
+        q_p=torch.tensor([self.atom_charges.get(a['element'],0.0) for a in pa], device=self.device)
+        q_l=torch.tensor([self.atom_charges.get(a['element'],0.0) for a in la], device=self.device)
+        if not torch.any(q_p) or not torch.any(q_l): return 0.0
+        d=torch.cdist(self._to_tensor([a['coords'] for a in pa]),self._to_tensor([a['coords'] for a in la]))
+        mask=(d>0.1)&(d<self.electro_cutoff)
+        qq=q_p.unsqueeze(1)*q_l.unsqueeze(0)
+        e=(k*qq/(eps_r*d))*mask.float()
+        return e.sum().item()
+
+    # ---- desolvation ------------------------------------------------------
+    def _desolv_impl(self, pa, la):
+        if not self._gpu: return super()._desolv_impl(pa,la)
+        torch=self.torch; polar={'N','O','S','P'}
+        l_pol=[i for i,a in enumerate(la) if a['element'] in polar]
+        if not l_pol: return 0.0
+        p_xyz=self._to_tensor([a['coords'] for a in pa])
+        l_xyz=self._to_tensor([la[i]['coords'] for i in l_pol])
+        d=torch.cdist(l_xyz,p_xyz)
+        buried=(d<4.0).any(dim=1)
+        return 0.5*buried.float().sum().item()
+
+    # ---- hydrophobic ------------------------------------------------------
+    def _hydro_impl(self, pa, la):
+        if not self._gpu: return super()._hydro_impl(pa,la)
+        torch=self.torch
+        p_xyz=self._to_tensor([a['coords'] for a in pa if a['element']=='C'])
+        l_xyz=self._to_tensor([a['coords'] for a in la if a['element']=='C'])
+        if p_xyz.nelement()==0 or l_xyz.nelement()==0: return 0.0
+        d=torch.cdist(p_xyz,l_xyz)
+        mask=d<self.hydrophobic_cutoff
+        score=-(self.hydrophobic_cutoff-d)/self.hydrophobic_cutoff
+        score*=mask.float()
+        return score.sum().item()
+
+    # ---- steric clashes ---------------------------------------------------
+    def _clash_impl(self, pa, la):
+        if not self._gpu: return super()._clash_impl(pa,la)
+        torch=self.torch
+        p_xyz=self._to_tensor([a['coords'] for a in pa])
+        l_xyz=self._to_tensor([a['coords'] for a in la])
+        d=torch.cdist(p_xyz,l_xyz)
+        p_r=torch.tensor([self.vdw_radii.get(a['element'],1.7) for a in pa], device=self.device).unsqueeze(1)
+        l_r=torch.tensor([self.vdw_radii.get(a['element'],1.7) for a in la], device=self.device).unsqueeze(0)
+        min_d=0.7*(p_r+l_r)
+        clash=((min_d-d)/min_d).clamp(min=0)
+        clash[d>=min_d]=0.0
+        return (clash**2).sum().item()
+
+    # ---- entropy (CPU is fine) -------------------------------------------
+    def _entropy_impl(self, l, p): return super()._entropy_impl(l,p)
+
+# ==========================================================================
+#  Composite / enhanced scorers
+# ==========================================================================
+class CompositeScoring(CPUEngine): pass
+class EnhancedScoring(CompositeScoring):
+    weights={'vdw':0.3,'hbond':0.2,'elec':0.2,'desolv':0.05,'hydrophobic':0.2,'clash':1.0,'entropy':0.25}
+class GPUCompositeScoring(GPUEngine, CompositeScoring): pass
+
+# ==========================================================================
+#  RMSD‑tether wrapper
+# ==========================================================================
+class TetheredScoringFunction:
+    def __init__(self, base:ScoringFunction, ref_coords:np.ndarray, weight=10.0, max_penalty=100.0):
+        self.base=base; self.ref=ref_coords; self.w=weight; self.max=max_penalty
+    def score(self, p:Protein, l:Ligand):
+        rmsd=math.sqrt(((l.xyz-self.ref)**2).mean())
+        return self.base.score(p,l)+min(self.w*rmsd, self.max)
+    def get_component_scores(self,p,l):
+        d=self.base.get_component_scores(p,l); d['RMSD penalty']=min(self.w*math.sqrt(((l.xyz-self.ref)**2).mean()), self.max);
+        d['Total']=self.score(p,l); return d
+
+# --------------------------------------------------------------------------
+__all__=['CompositeScoring','EnhancedScoring','GPUCompositeScoring','TetheredScoringFunction']

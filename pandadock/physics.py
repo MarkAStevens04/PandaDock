@@ -1216,20 +1216,41 @@ class MonteCarloSampling:
         self.grid_points = np.array(self.grid_points)
 
         # Optional: save to sphere.pdb for visualization
-        if self.output_dir is not None:
-            sphere_path = Path(self.output_dir) / "sphere.pdb"
-            sphere_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(sphere_path, 'w') as f:
-                for idx, point in enumerate(self.grid_points):
-                    if idx % subsample_rate == 0:
-                        f.write(
-                            f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
-                            f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
-                        )
-            if hasattr(self, 'logger'):
-                self.logger.info(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
-            else:
-                print(f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)")
+        
+        if hasattr(self, 'grid_points') and self.grid_points is not None and len(self.grid_points) > 0:
+            from .utils import save_transparent_sphere_pdb
+            grid_array = np.array(self.grid_points)
+            center = np.mean(grid_array, axis=0)
+            distances = np.linalg.norm(grid_array - center, axis=1)
+            radius = np.mean(distances)
+            
+            # Generate transparent sphere
+            if hasattr(self, 'output_dir') and self.output_dir is not None:
+                try:
+                    sphere_path = save_transparent_sphere_pdb(
+                        center=center,
+                        radius=radius,
+                        output_dir=self.output_dir,
+                        filename="sphere.pdb",
+                        transparency=0.25,    # 25% opaque = 75% transparent
+                        density=80,           # Moderate density
+                        style="surface",      # Clean surface
+                        element="He",         # Helium = small transparent atoms
+                        color_by_distance=False
+                    )
+                    
+                    message = f"💫 Transparent sphere written to {sphere_path} (center: {center}, radius: {radius:.2f}Å)"
+                    if hasattr(self, 'logger'):
+                        self.logger.info(message)
+                    else:
+                        print(message)
+                        
+                except Exception as e:
+                    error_msg = f"❌ Error creating transparent sphere: {e}"
+                    if hasattr(self, 'logger'):
+                        self.logger.error(error_msg)
+                    else:
+                        print(error_msg)
 
     
     def _adjust_search_radius(self, initial_radius, generation, total_generations):

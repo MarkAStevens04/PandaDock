@@ -630,7 +630,7 @@ def save_docking_results(results, output_dir='docking_results', flexible_residue
     os.makedirs(out_path, exist_ok=True)
     
     # Save top poses
-    for i, (pose, score) in enumerate(results[:10]):  # Save top 10 poses
+    for i, (pose, score) in enumerate(results[:20]):  # Save top 10 poses
         # Generate PDB file for the ligand pose
         pdb_path = out_path / f"pose_{i+1}_score:{score:.1f}.pdb"
         with open(pdb_path, 'w') as f:
@@ -1072,29 +1072,708 @@ def write_pose_as_mol2(mol, output_file):
     AllChem.MolToMol2File(mol, output_file)
     print(f"Pose saved to {output_file}")
 
-def save_sphere_pdb(self, center, radius, filename="sphere.pdb"):
-        """
-        Save a PDB file with a sphere of dummy atoms centered at `center` with radius `radius`.
+def save_sphere_pdb(self, center, radius, filename="sphere.pdb", 
+                   transparency=0.3, density=100, style="surface", 
+                   element="He", color_by_distance=False):
+    """
+    Save a PDB file with a transparent sphere of dummy atoms for visualization.
+    
+    Parameters:
+    -----------
+    center : np.ndarray
+        3D center of the sphere
+    radius : float
+        Radius of the sphere
+    filename : str
+        Output PDB filename
+    transparency : float (0.0-1.0)
+        Transparency level (0.0 = fully transparent, 1.0 = opaque)
+    density : int
+        Number of points to sample on the sphere
+    style : str
+        "surface" = points on sphere surface, "wireframe" = grid lines, "volume" = filled sphere
+    element : str
+        Element symbol for the dummy atoms (affects default visualization)
+    color_by_distance : bool
+        Whether to color-code atoms by distance from center
+    """
+    
+    # Create output path
+    if hasattr(self, 'output_dir'):
+        filepath = Path(self.output_dir) / filename
+    else:
+        filepath = Path(filename)
+    
+    # Choose element for transparency effects
+    # He (Helium) - often rendered as very small/transparent
+    # Ne (Neon) - noble gas, often transparent
+    # H (Hydrogen) - small, less obstructive
+    # C (Carbon) - standard but customizable
+    transparency_elements = {
+        "helium": "He",
+        "neon": "Ne", 
+        "hydrogen": "H",
+        "carbon": "C",
+        "dummy": "X"
+    }
+    
+    if element.lower() in transparency_elements:
+        atom_element = transparency_elements[element.lower()]
+    else:
+        atom_element = element.upper()[:2]  # Take first 2 characters
+    
+    with open(filepath, 'w') as f:
+        # Write PDB header with transparency information
+        f.write("REMARK   1 SPHERE VISUALIZATION FOR DOCKING SEARCH SPACE\n")
+        f.write(f"REMARK   2 CENTER: {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}\n")
+        f.write(f"REMARK   3 RADIUS: {radius:.3f} ANGSTROMS\n")
+        f.write(f"REMARK   4 TRANSPARENCY: {transparency:.2f}\n")
+        f.write(f"REMARK   5 DENSITY: {density} POINTS\n")
+        f.write(f"REMARK   6 STYLE: {style.upper()}\n")
+        f.write("REMARK   7 \n")
+        f.write("REMARK   8 FOR PYMOL TRANSPARENCY: select sphere, elem He; set transparency, 0.7, sphere\n")
+        f.write("REMARK   9 FOR CHIMERA: select :SPH; transparency 70\n")
+        f.write("REMARK  10 \n")
         
-        Parameters:
-        -----------
-        center : np.ndarray
-            3D center of the sphere
-        radius : float
-            Radius of the sphere
-        filename : str
-            Output PDB filename
-        """
-        with open(filename, 'w') as f:
-            for i in range(100):  # Sample 100 points on the sphere
-                theta = np.random.uniform(0, 2*np.pi)
-                phi = np.random.uniform(0, np.pi)
+        atom_count = 0
+        
+        if style.lower() == "surface":
+            # Generate points on sphere surface
+            points = generate_sphere_surface_points(center, radius, density)
+            
+        elif style.lower() == "wireframe":
+            # Generate wireframe grid
+            points = generate_sphere_wireframe(center, radius, density)
+            
+        elif style.lower() == "volume":
+            # Generate points throughout sphere volume
+            points = generate_sphere_volume_points(center, radius, density)
+            
+        else:  # Default to surface
+            points = generate_sphere_surface_points(center, radius, density)
+        
+        # Write atoms
+        for i, point in enumerate(points):
+            atom_count += 1
+            x, y, z = point
+            
+            # Calculate distance from center for color coding
+            if color_by_distance:
+                dist = np.linalg.norm(point - center)
+                # Use B-factor to encode distance (0-100 scale)
+                b_factor = (dist / radius) * 100.0
+            else:
+                b_factor = 50.0  # Neutral B-factor
+            
+            # Set occupancy based on transparency (inverted: high transparency = low occupancy)
+            occupancy = max(0.01, min(1.00, transparency))
+            
+            # Write PDB ATOM record
+            f.write(f"ATOM  {atom_count:5d}  {atom_element:<2s}  SPH A   1    "
+                   f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{b_factor:6.2f}           {atom_element}\n")
+        
+        f.write("END\n")
+    
+    print(f"💫 Transparent sphere saved: {filepath}")
+    print(f"   Center: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})")
+    print(f"   Radius: {radius:.2f} Å")
+    print(f"   Points: {atom_count}")
+    print(f"   Transparency: {transparency:.2f}")
+    print(f"   Element: {atom_element}")
+    
+    # Print visualization commands
+    print(f"\n🎨 Visualization Commands:")
+    print(f"   PyMOL: load {filepath.name}; set transparency, {1-transparency:.1f}, elem {atom_element}")
+    print(f"   ChimeraX: open {filepath.name}; transparency :{atom_count-99}-{atom_count} {int((1-transparency)*100)}")
+    
+    return filepath
+
+def generate_sphere_surface_points(center, radius, n_points):
+    """Generate evenly distributed points on sphere surface using Fibonacci spiral."""
+    points = []
+    
+    # Use Fibonacci spiral for more even distribution
+    golden_ratio = (1 + 5**0.5) / 2
+    
+    for i in range(n_points):
+        # Fibonacci spiral parameters
+        theta = 2 * np.pi * i / golden_ratio
+        phi = np.arccos(1 - 2 * i / n_points)
+        
+        # Convert to Cartesian coordinates
+        x = center[0] + radius * np.sin(phi) * np.cos(theta)
+        y = center[1] + radius * np.sin(phi) * np.sin(theta)
+        z = center[2] + radius * np.cos(phi)
+        
+        points.append(np.array([x, y, z]))
+    
+    return points
+
+def generate_sphere_wireframe(center, radius, n_lines=20):
+    """Generate wireframe representation with latitude/longitude lines."""
+    points = []
+    
+    # Latitude lines (horizontal circles)
+    for lat in range(-n_lines//2, n_lines//2 + 1):
+        phi = np.pi * lat / n_lines  # -π/2 to π/2
+        r_lat = radius * np.cos(phi)  # Radius at this latitude
+        z = center[2] + radius * np.sin(phi)
+        
+        # Points along this latitude circle
+        n_points_lat = max(6, int(20 * np.cos(phi)))  # Fewer points near poles
+        for lon in range(n_points_lat):
+            theta = 2 * np.pi * lon / n_points_lat
+            x = center[0] + r_lat * np.cos(theta)
+            y = center[1] + r_lat * np.sin(theta)
+            points.append(np.array([x, y, z]))
+    
+    # Longitude lines (vertical semicircles)
+    for lon in range(0, n_lines):
+        theta = 2 * np.pi * lon / n_lines
+        for i in range(n_lines):
+            phi = np.pi * (i - n_lines/2) / n_lines
+            x = center[0] + radius * np.sin(phi) * np.cos(theta)
+            y = center[1] + radius * np.sin(phi) * np.sin(theta)
+            z = center[2] + radius * np.cos(phi)
+            points.append(np.array([x, y, z]))
+    
+    return points
+
+def generate_sphere_volume_points(center, radius, n_points):
+    """Generate points distributed throughout sphere volume."""
+    points = []
+    
+    for i in range(n_points):
+        # Generate random point in unit sphere
+        while True:
+            x = np.random.uniform(-1, 1)
+            y = np.random.uniform(-1, 1)
+            z = np.random.uniform(-1, 1)
+            
+            if x*x + y*y + z*z <= 1.0:
+                break
+        
+        # Scale to desired radius and translate to center
+        point = center + radius * np.array([x, y, z])
+        points.append(point)
+    
+    return points
+
+def save_transparent_sphere_advanced(self, center, radius, filename="sphere.pdb",
+                                   layers=3, transparency_gradient=True, 
+                                   highlight_poles=False, grid_spacing=1.0):
+    """
+    Advanced transparent sphere with multiple layers and gradient effects.
+    
+    Parameters:
+    -----------
+    center : np.ndarray
+        3D center of the sphere
+    radius : float
+        Radius of the sphere
+    filename : str
+        Output PDB filename
+    layers : int
+        Number of concentric sphere layers
+    transparency_gradient : bool
+        Whether to make outer layers more transparent
+    highlight_poles : bool
+        Whether to highlight sphere poles (binding site directions)
+    grid_spacing : float
+        Spacing for grid points (Angstroms)
+    """
+    
+    filepath = Path(self.output_dir) / filename if hasattr(self, 'output_dir') else Path(filename)
+    
+    with open(filepath, 'w') as f:
+        # Enhanced header
+        f.write("REMARK   1 ADVANCED TRANSPARENT SPHERE VISUALIZATION\n")
+        f.write(f"REMARK   2 CENTER: {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}\n")
+        f.write(f"REMARK   3 RADIUS: {radius:.3f} ANGSTROMS\n")
+        f.write(f"REMARK   4 LAYERS: {layers}\n")
+        f.write(f"REMARK   5 GRADIENT: {'YES' if transparency_gradient else 'NO'}\n")
+        f.write("REMARK   6 \n")
+        f.write("REMARK   7 CHAIN A: OUTER LAYER (MOST TRANSPARENT)\n")
+        f.write("REMARK   8 CHAIN B: MIDDLE LAYER\n") 
+        f.write("REMARK   9 CHAIN C: INNER LAYER (LEAST TRANSPARENT)\n")
+        f.write("REMARK  10 \n")
+        f.write("REMARK  11 PYMOL SETUP:\n")
+        f.write("REMARK  12   set transparency, 0.8, chain A\n")
+        f.write("REMARK  13   set transparency, 0.6, chain B\n")
+        f.write("REMARK  14   set transparency, 0.4, chain C\n")
+        f.write("REMARK  15 \n")
+        
+        atom_count = 0
+        chain_letters = ['A', 'B', 'C', 'D', 'E']
+        
+        # Generate multiple layers
+        for layer in range(layers):
+            layer_radius = radius * (layer + 1) / layers
+            layer_transparency = 0.9 - (layer * 0.3) if transparency_gradient else 0.5
+            chain = chain_letters[layer % len(chain_letters)]
+            
+            # Generate points for this layer
+            n_points = max(50, int(100 * (layer + 1) / layers))  # More points in outer layers
+            layer_points = generate_sphere_surface_points(center, layer_radius, n_points)
+            
+            for point in layer_points:
+                atom_count += 1
+                x, y, z = point
                 
-                x = center[0] + radius * np.sin(phi) * np.cos(theta)
-                y = center[1] + radius * np.sin(phi) * np.sin(theta)
-                z = center[2] + radius * np.cos(phi)
+                # Use different elements for different layers
+                elements = ['He', 'Ne', 'Ar', 'Kr', 'Xe']
+                element = elements[layer % len(elements)]
                 
-                f.write(
-                    f"ATOM  {i+1:5d}  X   SPH A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          X\n"
+                f.write(f"ATOM  {atom_count:5d}  {element:<2s}  SPH {chain}   1    "
+                       f"{x:8.3f}{y:8.3f}{z:8.3f}{layer_transparency:6.2f}{50.0:6.2f}           {element}\n")
+        
+        # Add pole markers if requested
+        if highlight_poles:
+            poles = [
+                center + np.array([0, 0, radius]),    # North pole
+                center + np.array([0, 0, -radius]),   # South pole
+                center + np.array([radius, 0, 0]),    # East pole
+                center + np.array([-radius, 0, 0]),   # West pole
+                center + np.array([0, radius, 0]),    # Front pole
+                center + np.array([0, -radius, 0])    # Back pole
+            ]
+            
+            for i, pole in enumerate(poles):
+                atom_count += 1
+                x, y, z = pole
+                f.write(f"ATOM  {atom_count:5d}  P   POL P   1    "
+                       f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 99.00            P\n")
+        
+        f.write("END\n")
+    
+    print(f"✨ Advanced transparent sphere saved: {filepath}")
+    print(f"   Layers: {layers}")
+    print(f"   Total atoms: {atom_count}")
+    print(f"   Gradient transparency: {transparency_gradient}")
+    
+    return filepath
+
+def save_minimal_sphere_pdb(self, center, radius, filename="minimal_sphere.pdb", points=20):
+    """
+    Minimal transparent sphere with just key points for less visual clutter.
+    """
+    filepath = Path(self.output_dir) / filename if hasattr(self, 'output_dir') else Path(filename)
+    
+    with open(filepath, 'w') as f:
+        f.write("REMARK   1 MINIMAL SPHERE OUTLINE\n")
+        f.write(f"REMARK   2 CENTER: {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}\n")
+        f.write(f"REMARK   3 RADIUS: {radius:.3f} ANGSTROMS\n")
+        f.write("REMARK   4 MINIMAL VISUALIZATION - ONLY KEY POINTS\n")
+        f.write("REMARK   5 \n")
+        
+        # Generate only key directional points
+        directions = [
+            [1, 0, 0], [-1, 0, 0],     # X-axis
+            [0, 1, 0], [0, -1, 0],     # Y-axis  
+            [0, 0, 1], [0, 0, -1],     # Z-axis
+            [1, 1, 0], [-1, -1, 0],    # XY diagonal
+            [1, 0, 1], [-1, 0, -1],    # XZ diagonal
+            [0, 1, 1], [0, -1, -1],    # YZ diagonal
+        ]
+        
+        # Add some intermediate points for better sphere outline
+        for i in range(points - len(directions)):
+            theta = 2 * np.pi * i / (points - len(directions))
+            phi = np.pi * np.random.random()
+            direction = [np.sin(phi) * np.cos(theta), 
+                        np.sin(phi) * np.sin(theta), 
+                        np.cos(phi)]
+            directions.append(direction)
+        
+        for i, direction in enumerate(directions):
+            # Normalize direction
+            direction = np.array(direction)
+            direction = direction / np.linalg.norm(direction)
+            
+            # Place point on sphere surface
+            point = center + radius * direction
+            x, y, z = point
+            
+            f.write(f"ATOM  {i+1:5d}  He  SPH A   1    "
+                   f"{x:8.3f}{y:8.3f}{z:8.3f}  0.20 20.00           He\n")
+        
+        f.write("END\n")
+    
+    print(f"🔘 Minimal sphere saved: {filepath} ({len(directions)} points)")
+    return filepath
+
+def save_transparent_sphere_pdb(center, radius, output_dir, filename="sphere.pdb", 
+                               transparency=0.3, density=100, style="surface", 
+                               element="He", color_by_distance=False):
+    """
+    Save a transparent sphere PDB file for docking search space visualization.
+    
+    Parameters:
+    -----------
+    center : np.ndarray or list
+        3D center of the sphere [x, y, z]
+    radius : float
+        Radius of the sphere in Angstroms
+    output_dir : Path or str
+        Output directory
+    filename : str
+        Output PDB filename
+    transparency : float (0.0-1.0)
+        Transparency level (0.0 = fully transparent, 1.0 = opaque)
+    density : int
+        Number of points to sample on the sphere
+    style : str
+        "surface", "wireframe", or "minimal"
+    element : str
+        Element symbol for the dummy atoms
+    color_by_distance : bool
+        Whether to color-code atoms by distance from center
+    """
+    
+    # Ensure center is numpy array
+    center = np.array(center)
+    
+    # Create output path
+    filepath = Path(output_dir) / filename
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Choose element for transparency effects
+    transparency_elements = {
+        "helium": "He", "neon": "Ne", "hydrogen": "H", 
+        "carbon": "C", "dummy": "X"
+    }
+    
+    if element.lower() in transparency_elements:
+        atom_element = transparency_elements[element.lower()]
+    else:
+        atom_element = element.upper()[:2]
+    
+    with open(filepath, 'w') as f:
+        # Write PDB header with transparency information
+        f.write("REMARK   1 TRANSPARENT SPHERE FOR DOCKING SEARCH SPACE\n")
+        f.write(f"REMARK   2 CENTER: {center[0]:.3f} {center[1]:.3f} {center[2]:.3f}\n")
+        f.write(f"REMARK   3 RADIUS: {radius:.3f} ANGSTROMS\n")
+        f.write(f"REMARK   4 TRANSPARENCY: {transparency:.2f} (0=transparent, 1=opaque)\n")
+        f.write(f"REMARK   5 DENSITY: {density} POINTS\n")
+        f.write(f"REMARK   6 STYLE: {style.upper()}\n")
+        f.write("REMARK   7 \n")
+        f.write("REMARK   8 PYMOL COMMANDS:\n")
+        f.write(f"REMARK   9   load {filename}\n")
+        f.write(f"REMARK  10   set transparency, {1-transparency:.1f}, elem {atom_element}\n")
+        f.write(f"REMARK  11   set sphere_scale, 0.3, elem {atom_element}\n")
+        f.write("REMARK  12   color gray80, elem He\n")
+        f.write("REMARK  13 \n")
+        
+        # Generate points based on style
+        if style.lower() == "surface":
+            points = generate_fibonacci_sphere_points(center, radius, density)
+        elif style.lower() == "wireframe":
+            points = generate_wireframe_points(center, radius, density)
+        elif style.lower() == "minimal":
+            points = generate_minimal_points(center, radius, min(density, 24))
+        else:  # Default to surface
+            points = generate_fibonacci_sphere_points(center, radius, density)
+        
+        # Write atoms
+        for i, point in enumerate(points):
+            x, y, z = point
+            
+            # Calculate distance from center for color coding
+            if color_by_distance:
+                dist = np.linalg.norm(point - center)
+                b_factor = (dist / radius) * 100.0  # 0-100 scale
+            else:
+                b_factor = 50.0
+            
+            # Set occupancy based on transparency
+            occupancy = max(0.01, min(1.00, transparency))
+            
+            # Write PDB ATOM record
+            f.write(f"HETATM{i+1:5d}  {atom_element:<2s}  SPH A   1    "
+                   f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{b_factor:6.2f}           {atom_element}\n")
+        
+        f.write("END\n")
+    
+    print(f"💫 Transparent sphere saved: {filepath}")
+    print(f"   Center: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})")
+    print(f"   Radius: {radius:.2f} Å")
+    print(f"   Points: {len(points)}")
+    print(f"   Style: {style}")
+    print(f"   Transparency: {transparency:.2f}")
+    
+    return filepath
+
+def generate_fibonacci_sphere_points(center, radius, n_points):
+    """Generate evenly distributed points on sphere surface using Fibonacci spiral."""
+    points = []
+    golden_ratio = (1 + 5**0.5) / 2
+    
+    for i in range(n_points):
+        theta = 2 * np.pi * i / golden_ratio
+        phi = np.arccos(1 - 2 * i / n_points)
+        
+        x = center[0] + radius * np.sin(phi) * np.cos(theta)
+        y = center[1] + radius * np.sin(phi) * np.sin(theta)
+        z = center[2] + radius * np.cos(phi)
+        
+        points.append(np.array([x, y, z]))
+    
+    return points
+
+def generate_wireframe_points(center, radius, n_lines=20):
+    """Generate wireframe grid points."""
+    points = []
+    
+    # Latitude circles
+    for lat in range(-n_lines//4, n_lines//4 + 1, 2):  # Fewer lines for cleaner look
+        phi = np.pi * lat / n_lines
+        r_lat = radius * np.cos(phi)
+        z = center[2] + radius * np.sin(phi)
+        
+        n_points_lat = max(8, int(16 * np.cos(phi)))
+        for lon in range(n_points_lat):
+            theta = 2 * np.pi * lon / n_points_lat
+            x = center[0] + r_lat * np.cos(theta)
+            y = center[1] + r_lat * np.sin(theta)
+            points.append(np.array([x, y, z]))
+    
+    # Longitude semicircles
+    for lon in range(0, n_lines//2, 2):  # Fewer lines
+        theta = 2 * np.pi * lon / n_lines
+        for i in range(0, n_lines, 2):  # Skip points for sparser grid
+            phi = np.pi * (i - n_lines/2) / n_lines
+            x = center[0] + radius * np.sin(phi) * np.cos(theta)
+            y = center[1] + radius * np.sin(phi) * np.sin(theta)
+            z = center[2] + radius * np.cos(phi)
+            points.append(np.array([x, y, z]))
+    
+    return points
+
+def generate_minimal_points(center, radius, n_points=24):
+    """Generate minimal set of key directional points."""
+    points = []
+    
+    # Key directions (6 primary + 8 corners + 12 edges of cube)
+    directions = [
+        # Primary axes
+        [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+        # Cube corners (normalized)
+        [1, 1, 1], [-1, 1, 1], [1, -1, 1], [1, 1, -1],
+        [-1, -1, 1], [-1, 1, -1], [1, -1, -1], [-1, -1, -1],
+        # Edge midpoints
+        [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+        [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+        [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1]
+    ]
+    
+    # Take first n_points and normalize
+    for i, direction in enumerate(directions[:n_points]):
+        direction = np.array(direction, dtype=float)
+        direction = direction / np.linalg.norm(direction)
+        point = center + radius * direction
+        points.append(point)
+    
+    return points
+
+def save_metal_docking_results(results, metal_centers, output_dir, top_n=10):
+    """
+    Save metal docking results with coordination analysis.
+    
+    Parameters:
+    -----------
+    results : list
+        List of (pose, score) tuples
+    metal_centers : list
+        List of metal centers
+    output_dir : str or Path
+        Output directory
+    top_n : int
+        Number of top poses to analyze in detail
+    """
+    from .metal_docking import MetalDockingPreparation
+    
+    output_path = Path(output_dir)
+    
+    # Save detailed metal coordination analysis for top poses
+    for i, (pose, score) in enumerate(results[:top_n]):
+        pose_dir = output_path / f"pose_{i+1}"
+        pose_dir.mkdir(exist_ok=True)
+        
+        # Save pose
+        pose_file = pose_dir / f"pose_{i+1}_score_{score:.2f}.pdb"
+        pose.write_pdb(pose_file)
+        
+        # Analyze metal coordination for this pose
+        coordination_analysis = {}
+        
+        for j, metal_center in enumerate(metal_centers):
+            # Find coordinating atoms in this pose
+            coordinating_atoms = []
+            for atom in pose.atoms:
+                element = atom.get('element', atom.get('name', ''))[:1]
+                if element in ['N', 'O', 'S', 'P', 'C']:
+                    distance = np.linalg.norm(
+                        np.array(atom['coords']) - metal_center.coords
+                    )
+                    if distance <= 3.5:  # Coordination distance
+                        coordinating_atoms.append({
+                            'atom_name': atom.get('name', ''),
+                            'element': element,
+                            'distance': float(distance),
+                            'coords': atom['coords'].tolist()
+                        })
+            
+            # Create temporary metal center for scoring
+            temp_center = copy.deepcopy(metal_center)
+            for atom_info in coordinating_atoms:
+                temp_center.add_coordinating_atom({
+                    'coords': np.array(atom_info['coords']),
+                    'element': atom_info['element'],
+                    'name': atom_info['atom_name']
+                })
+            
+            coordination_score = temp_center.get_coordination_score()
+            
+            coordination_analysis[f"metal_{j+1}"] = {
+                'element': metal_center.element,
+                'coordinates': metal_center.coords.tolist(),
+                'coordinating_atoms': coordinating_atoms,
+                'coordination_number': len(coordinating_atoms),
+                'coordination_score': float(coordination_score),
+                'preferred_geometry': metal_center.preferred_geometry
+            }
+        
+        # Save coordination analysis
+        analysis_file = pose_dir / "coordination_analysis.json"
+        with open(analysis_file, 'w') as f:
+            json.dump(coordination_analysis, f, indent=2)
+    
+    # Create summary report
+    summary_file = output_path / "metal_docking_summary.txt"
+    with open(summary_file, 'w') as f:
+        f.write("=" * 70 + "\n")
+        f.write("METAL-AWARE DOCKING SUMMARY\n")
+        f.write("=" * 70 + "\n\n")
+        
+        f.write(f"Number of metal centers: {len(metal_centers)}\n\n")
+        
+        for i, metal_center in enumerate(metal_centers):
+            f.write(f"Metal Center {i+1}:\n")
+            f.write(f"  Element: {metal_center.element}\n")
+            f.write(f"  Coordinates: ({metal_center.coords[0]:.2f}, {metal_center.coords[1]:.2f}, {metal_center.coords[2]:.2f})\n")
+            f.write(f"  Preferred Geometry: {metal_center.preferred_geometry}\n")
+            f.write(f"  Existing Coordination: {metal_center.coordination_number} atoms\n\n")
+        
+        f.write("TOP POSES COORDINATION ANALYSIS:\n")
+        f.write("-" * 40 + "\n")
+        
+        for i, (pose, score) in enumerate(results[:top_n]):
+            f.write(f"\nPose {i+1} (Score: {score:.2f}):\n")
+            
+            for j, metal_center in enumerate(metal_centers):
+                # Quick coordination analysis
+                coordinating_count = 0
+                for atom in pose.atoms:
+                    element = atom.get('element', atom.get('name', ''))[:1]
+                    if element in ['N', 'O', 'S', 'P']:
+                        distance = np.linalg.norm(
+                            np.array(atom['coords']) - metal_center.coords
+                        )
+                        if distance <= 3.0:
+                            coordinating_count += 1
+                
+                f.write(f"  Metal {j+1} ({metal_center.element}): {coordinating_count} coordinating atoms\n")
+
+
+def write_metal_complex_pdb(protein, ligand, metal_centers, output_file):
+    """
+    Write a PDB file showing the complete metal complex.
+    
+    Parameters:
+    -----------
+    protein : Protein
+        Protein object
+    ligand : Ligand
+        Ligand object
+    metal_centers : list
+        List of metal centers
+    output_file : str or Path
+        Output PDB file path
+    """
+    with open(output_file, 'w') as f:
+        # Write header
+        f.write("REMARK   Metal-Ligand Complex from PandaDock\n")
+        f.write("REMARK   Metal Centers and Coordination Environment\n")
+        
+        atom_counter = 1
+        
+        # Write protein atoms (only those near metals)
+        written_protein_atoms = set()
+        for metal_center in metal_centers:
+            for protein_atom in protein.atoms:
+                distance = np.linalg.norm(
+                    np.array(protein_atom['coords']) - metal_center.coords
                 )
-            f.write("END\n")
+                
+                if distance <= 8.0 and id(protein_atom) not in written_protein_atoms:
+                    # Write protein atom
+                    element = protein_atom.get('element', protein_atom.get('name', ''))[:2]
+                    f.write(f"ATOM  {atom_counter:5d} {protein_atom.get('name', 'X'):>4s} "
+                           f"{protein_atom.get('residue_name', 'UNK'):>3s} A"
+                           f"{protein_atom.get('residue_number', 1):4d}    "
+                           f"{protein_atom['coords'][0]:8.3f}"
+                           f"{protein_atom['coords'][1]:8.3f}"
+                           f"{protein_atom['coords'][2]:8.3f}"
+                           f"  1.00  0.00          {element:>2s}\n")
+                    
+                    written_protein_atoms.add(id(protein_atom))
+                    atom_counter += 1
+        
+        # Write metal atoms
+        for i, metal_center in enumerate(metal_centers):
+            f.write(f"HETATM{atom_counter:5d} {metal_center.element:>4s} MET A{i+900:4d}    "
+                   f"{metal_center.coords[0]:8.3f}"
+                   f"{metal_center.coords[1]:8.3f}"
+                   f"{metal_center.coords[2]:8.3f}"
+                   f"  1.00  0.00          {metal_center.element:>2s}\n")
+            atom_counter += 1
+        
+        # Write ligand atoms
+        for atom in ligand.atoms:
+            element = atom.get('element', atom.get('name', ''))[:2]
+            f.write(f"HETATM{atom_counter:5d} {atom.get('name', 'X'):>4s} LIG A{999:4d}    "
+                   f"{atom['coords'][0]:8.3f}"
+                   f"{atom['coords'][1]:8.3f}"
+                   f"{atom['coords'][2]:8.3f}"
+                   f"  1.00  0.00          {element:>2s}\n")
+            atom_counter += 1
+        
+        # Write coordination bonds as CONECT records
+        metal_atom_numbers = []
+        ligand_start_number = atom_counter - len(ligand.atoms)
+        
+        for i, metal_center in enumerate(metal_centers):
+            metal_atom_number = ligand_start_number - len(metal_centers) + i
+            metal_atom_numbers.append(metal_atom_number)
+            
+            # Find coordinating ligand atoms
+            coordinating_ligand_atoms = []
+            for j, atom in enumerate(ligand.atoms):
+                element = atom.get('element', atom.get('name', ''))[:1]
+                if element in ['N', 'O', 'S', 'P']:
+                    distance = np.linalg.norm(
+                        np.array(atom['coords']) - metal_center.coords
+                    )
+                    if distance <= 3.0:
+                        coordinating_ligand_atoms.append(ligand_start_number + j)
+            
+            # Write CONECT records for metal-ligand bonds
+            if coordinating_ligand_atoms:
+                conect_line = f"CONECT{metal_atom_number:5d}"
+                for coord_atom in coordinating_ligand_atoms[:4]:  # Max 4 per CONECT line
+                    conect_line += f"{coord_atom:5d}"
+                f.write(conect_line + "\n")
+        
+        f.write("END\n")
+
+

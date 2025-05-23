@@ -38,7 +38,7 @@ class Protein:
         if grid_center is not None:
                 self.active_site = self._select_atoms_near(grid_center, radius=10.0)
         else:
-                self.detect_pockets()
+                self.detect_pockets_auto()
     
     def _select_atoms_near(self, center, radius=10.0):
         """Select atoms within a radius of the specified center point."""
@@ -131,118 +131,83 @@ class Protein:
 
 
 
-    def detect_pockets(self):
+    def detect_pockets_optimized(self, probe_radius=1.4, grid_spacing=0.8):
         """
-        Advanced algorithm to detect potential binding pockets.
+        Detect binding pockets using optimized CASTp-based algorithm.
+        
+        Parameters:
+        -----------
+        probe_radius : float
+            Radius of the probe sphere for pocket detection (default: 1.4 Å)
+        grid_spacing : float
+            Grid spacing for pocket detection (default: 0.8 Å)
+            
         Returns:
         --------
         list
-            List of potential binding pockets as dictionaries with center, radius, and other properties.
+            List of detected pockets with properties
         """
-        print("Detecting binding pockets...")
-        detector = OptimizedCastpDetector(probe_radius=1.4, grid_spacing=1.0)  # Increased spacing for better performance
-        pockets = detector.detect_pockets(self)
+        from .pockets import OptimizedCastpDetector
         
-        if not pockets:
-            print("No pockets detected. Using protein center as fallback.")
-            center = np.mean(self.xyz, axis=0)
-            radius = 10.0
-            self.define_active_site(center, radius)
-            return []
+        detector = OptimizedCastpDetector(
+            probe_radius=probe_radius,
+            grid_spacing=grid_spacing
+        )
         
-        print(f"Detected {len(pockets)} potential binding pockets.")
+        return detector.detect_pockets(self)
+
+# Also add a method to auto-select the best pocket detection method
+    def detect_pockets_auto(self, method='optimized', **kwargs):
+        """
+        Auto-detect pockets using the specified method.
         
-        # Add the pockets to the protein for visualization or further use
-        for i, pocket in enumerate(pockets):
-            print(f"Pocket {i+1}: volume = {pocket['volume']:.1f} Å³, {len(pocket['residues'])} residues")
+        Parameters:
+        -----------
+        method : str
+            Method to use ('optimized', 'default', or 'both')
+        **kwargs
+            Additional parameters for pocket detection
             
-        # Use the largest pocket as the default active site
-        if pockets:
-            self.define_active_site(pockets[0]['center'], np.power(3*pockets[0]['volume']/(4*np.pi), 1/3))
+        Returns:
+        --------
+        list
+            List of detected pockets
+        """
+        if method == 'optimized':
+            return self.detect_pockets_optimized(**kwargs)
+        elif method == 'default':
+            return self.detect_pockets()
+        elif method == 'both':
+            # Use both methods and combine results
+            optimized_pockets = self.detect_pockets_optimized(**kwargs)
+            default_pockets = self.detect_pockets()
             
-        return pockets
-    # def detect_pockets(self):
-    #     """
-    #     Advanced algorithm to detect potential binding pockets using geometric and physicochemical properties.
+            # Combine and rank pockets
+            all_pockets = optimized_pockets + default_pockets
+            
+            # Remove duplicates based on distance between centers
+            unique_pockets = []
+            for pocket in all_pockets:
+                is_duplicate = False
+                for unique_pocket in unique_pockets:
+                    distance = np.linalg.norm(pocket['center'] - unique_pocket['center'])
+                    if distance < 3.0:  # 3Å threshold for duplicate detection
+                        # Keep the one with larger volume
+                        if pocket.get('volume', 0) > unique_pocket.get('volume', 0):
+                            unique_pockets.remove(unique_pocket)
+                            unique_pockets.append(pocket)
+                        is_duplicate = True
+                        break
+                
+                if not is_duplicate:
+                    unique_pockets.append(pocket)
+            
+            # Sort by volume (largest first)
+            unique_pockets.sort(key=lambda x: x.get('volume', 0), reverse=True)
+            return unique_pockets
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'optimized', 'default', or 'both'")
 
-    #     Returns:
-    #     --------
-    #     list
-    #         List of potential binding pockets as dictionaries with center, radius, and other properties.
-    #     """
-    #     from scipy.spatial import ConvexHull, distance
-    #     from sklearn.cluster import DBSCAN
-
-    #     pockets = []
-
-    #     try:
-    #         # Step 1: Identify surface atoms
-    #         print("Detecting surface atoms...")
-    #         surface_atoms = self._get_surface_atoms()
-    #         if len(surface_atoms) == 0:
-    #             print("No surface atoms detected. Pocket detection failed.")
-    #             # Fallback to protein centroid
-    #             center = np.mean(self.xyz, axis=0)
-    #             radius = 10.0
-    #             self.define_active_site(center, radius)
-    #             return []
-
-    #         print(f"Detected {len(surface_atoms)} surface atoms.")
-
-    #         # Step 2: Cluster surface atoms
-    #         print("Clustering surface atoms to identify pockets...")
-    #         clustering = DBSCAN(eps=4.0, min_samples=5).fit(surface_atoms)
-    #         labels = clustering.labels_
-
-    #         unique_labels = set(labels)
-    #         for label in unique_labels:
-    #             if label == -1:
-    #                 continue
-    #             cluster_points = surface_atoms[labels == label]
-    #             if len(cluster_points) < 10:
-    #                 continue
-
-    #             center = np.mean(cluster_points, axis=0)
-    #             radius = np.max(np.linalg.norm(cluster_points - center, axis=1))
-
-    #             hull = ConvexHull(cluster_points)
-    #             pockets.append({
-    #                 'center': center,
-    #                 'radius': radius,
-    #                 'size': len(cluster_points),
-    #                 'hull_volume': hull.volume,
-    #                 'hull_area': hull.area
-    #             })
-
-    #         pockets = sorted(pockets, key=lambda x: (x['size'], x['hull_volume']), reverse=True)
-    #         print(f"Detected {len(pockets)} potential binding pockets.")
-
-    #     except Exception as e:
-    #         print(f"Error in pocket detection: {e}")
-    #         print("Ensure required libraries (scipy, sklearn) are installed.")
-
-    #     return pockets
-
-    # def detect_pockets(self):
-    #     """
-    #     Advanced algorithm to detect potential binding pockets.
-    #     Returns:
-    #     --------
-    #     list
-    #         List of potential binding pockets as dictionaries with center, radius, and other properties.
-    #     """
-    #     detector = CastpLikeDetector(probe_radius=1.4, grid_spacing=0.8)
-    #     pockets = detector.detect_pockets(self)
-        
-    #     if not pockets:
-    #         print("No pockets detected. Using protein center as fallback.")
-    #         center = np.mean(self.xyz, axis=0)
-    #         radius = 10.0
-    #         self.define_active_site(center, radius)
-    #         return []
-        
-    #     print(f"Detected {len(pockets)} potential binding pockets.")
-    #     return pockets
 
     def _get_surface_atoms(self, probe_radius=1.4):
         """

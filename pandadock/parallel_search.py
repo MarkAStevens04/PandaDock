@@ -210,22 +210,41 @@ class GridUtilsMixin:
                 print(message)
 
             # Save Light Sphere PDB (subsample)
-            subsample_rate = 20
-            if hasattr(self, 'output_dir') and self.output_dir is not None:
-                sphere_path = Path(self.output_dir) / "sphere.pdb"
-                sphere_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(sphere_path, 'w') as f:
-                    for idx, point in enumerate(self.grid_points):
-                        if idx % subsample_rate == 0:
-                            f.write(
-                                f"HETATM{idx+1:5d} {'S':<2s}   SPH A   1    "
-                                f"{point[0]:8.3f}{point[1]:8.3f}{point[2]:8.3f}  1.00  0.00          S\n"
-                            )
-                message = f"Sphere grid written to {sphere_path} (subsampled every {subsample_rate} points)"
-                if hasattr(self, 'logger'):
-                    self.logger.info(message)
-                else:
-                    print(message)
+            
+            if hasattr(self, 'grid_points') and self.grid_points and len(self.grid_points) > 0:
+                from .utils import save_transparent_sphere_pdb
+                grid_array = np.array(self.grid_points)
+                center = np.mean(grid_array, axis=0)
+                distances = np.linalg.norm(grid_array - center, axis=1)
+                radius = np.mean(distances)
+                
+                # Generate transparent sphere
+                if hasattr(self, 'output_dir') and self.output_dir is not None:
+                    try:
+                        sphere_path = save_transparent_sphere_pdb(
+                            center=center,
+                            radius=radius,
+                            output_dir=self.output_dir,
+                            filename="sphere.pdb",
+                            transparency=0.25,    # 25% opaque = 75% transparent
+                            density=80,           # Moderate density
+                            style="surface",      # Clean surface
+                            element="He",         # Helium = small transparent atoms
+                            color_by_distance=False
+                        )
+                        
+                        message = f"💫 Transparent sphere written to {sphere_path} (center: {center}, radius: {radius:.2f}Å)"
+                        if hasattr(self, 'logger'):
+                            self.logger.info(message)
+                        else:
+                            print(message)
+                            
+                    except Exception as e:
+                        error_msg = f"❌ Error creating transparent sphere: {e}"
+                        if hasattr(self, 'logger'):
+                            self.logger.error(error_msg)
+                        else:
+                            print(error_msg)
     
     def initialize_smart_grid(self, protein, center, radius, spacing=0.5, margin=0.7):
         """
@@ -1479,7 +1498,8 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm, GridUtilsMixin, ClashDetectionM
                  mutation_rate=0.3, crossover_rate=0.8, tournament_size=3, 
                  n_processes=None, batch_size=None, process_pool=None, 
                  output_dir=None, perform_local_opt=False, grid_spacing=0.375, 
-                 grid_radius=10.0, grid_center=None, logger=None):
+                 grid_radius=10.0, grid_center=None, logger=None,
+                 use_gpu=False, gpu_device=None, gpu_provider=None, **kwargs):
         """
         Initialize parallel genetic algorithm.
         
@@ -1527,6 +1547,20 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm, GridUtilsMixin, ClashDetectionM
         self.grid_center = np.array(grid_center) if grid_center is not None else np.array([0.0, 0.0, 0.0]) 
         self.logger = logger or logging.getLogger(__name__) 
         self.grid_points = None
+
+        # GPU configuration
+        self.use_gpu = use_gpu
+        self.gpu_device = gpu_device
+        self.gpu_provider = gpu_provider
+
+
+        # Log GPU usage
+        if self.use_gpu:
+            self.logger.info(f"[GA] GPU acceleration enabled using {gpu_provider}")
+            if gpu_device:
+                self.logger.info(f"[GA] GPU device: {gpu_device}")
+        else:
+            self.logger.info("[GA] Using CPU-only mode")
 
         # Setup parallel processing
         if n_processes is None:
@@ -1768,6 +1802,94 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm, GridUtilsMixin, ClashDetectionM
         
         return results
 
+    def _evaluate_population_gpu(self, protein, population):
+        """
+        GPU-accelerated population evaluation.
+        """
+        if not self.use_gpu:
+            return self._evaluate_population(protein, population)
+            
+        self.logger.info(f"[GA] Using GPU batch evaluation for {len(population)} poses")
+        
+        # Extract poses from population
+        poses = [pose for pose, _ in population]
+        
+        try:
+            # Use GPU batch scoring if available
+            if hasattr(self.scoring_function, 'score_batch_gpu'):
+                scores = self.scoring_function.score_batch_gpu(protein, poses, device=self.gpu_device)
+            elif hasattr(self.scoring_function, 'score_batch'):
+                scores = self.scoring_function.score_batch(protein, poses)
+            else:
+                # Fallback to sequential but log warning
+                self.logger.warning("[GA] GPU batch scoring not available, using sequential")
+                return self._evaluate_population(protein, population)
+            
+            # Combine poses with scores
+            results = [(copy.deepcopy(pose), score) for pose, score in zip(poses, scores)]
+            
+            self.logger.info(f"[GA] GPU evaluation completed for {len(results)} poses")
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"[GA] GPU evaluation failed: {e}")
+            self.logger.info("[GA] Falling back to CPU evaluation")
+            return self._evaluate_population(protein, population)
+
+    def _evaluate_population(self, protein, population):
+        """
+        Enhanced population evaluation that uses GPU if available.
+        """
+        # Use GPU evaluation if enabled
+        if self.use_gpu:
+            return self._evaluate_population_gpu(protein, population)
+            
+        # Original CPU implementation
+        poses = [pose for pose, _ in population]
+        
+        # Batch scoring with the scoring function
+        if hasattr(self.scoring_function, 'score_batch'):
+            self.logger.info(f"Using batch scoring for {len(poses)} poses...")
+            try:
+                scores = self.scoring_function.score_batch(protein, poses)
+                results = [(copy.deepcopy(pose), score) for pose, score in zip(poses, scores)]
+            except Exception as e:
+                self.logger.error(f"Batch scoring failed: {e}, falling back to sequential scoring")
+                results = self._evaluate_population_sequential(protein, population)
+        else:
+            results = self._evaluate_population_sequential(protein, population)
+        
+        return results
+
+    def _evaluate_population_sequential(self, protein, population):
+        """Sequential evaluation fallback."""
+        self.logger.info("Using sequential scoring...")
+        
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(total=len(population), desc="Evaluating poses")
+        except ImportError:
+            progress_bar = None
+            
+        results = []
+        for i, (pose, _) in enumerate(population):
+            try:
+                score = self.scoring_function.score(protein, pose)
+                results.append((copy.deepcopy(pose), score))
+            except Exception as e:
+                self.logger.warning(f"Error scoring pose {i}: {e}")
+                results.append((copy.deepcopy(pose), float('inf')))
+            
+            if progress_bar:
+                progress_bar.update(1)
+            elif i % 10 == 0 and i > 0 and len(population) > 50:
+                print(f"  Evaluating pose {i}/{len(population)}...")
+        
+        if progress_bar:
+            progress_bar.close()
+            
+        return results
+    
     def _mutate(self, individual, original_individual, center, radius):
         """
         Improved mutation with boundary constraints.
@@ -1845,7 +1967,8 @@ class ParallelGeneticAlgorithm(GeneticAlgorithm, GridUtilsMixin, ClashDetectionM
                 
         elif mutation_type == 'rotation':
             # Random rotation with boundary-aware angle
-            angle = np.random.normal(0, max_rotation)
+            safe_max_rotation = max(max_rotation, 1e-6)  # Ensure positive stddev
+            angle = np.random.normal(0, safe_max_rotation)
             axis = np.random.randn(3)
             axis = axis / np.linalg.norm(axis)
             
@@ -2239,7 +2362,8 @@ class ParallelRandomSearch(RandomSearch, GridUtilsMixin, ClashDetectionMixin, Po
     
     def __init__(self, scoring_function, max_iterations=10, n_processes=None, 
                  batch_size=None, process_pool=None, output_dir=None, 
-                 grid_spacing=0.375, grid_radius=10.0, grid_center=None):
+                 grid_spacing=0.375, grid_radius=10.0, grid_center=None,
+                 use_gpu=False, gpu_device=None, gpu_provider=None, **kwargs):
         """
         Initialize parallel random search.
         
@@ -2270,6 +2394,19 @@ class ParallelRandomSearch(RandomSearch, GridUtilsMixin, ClashDetectionMixin, Po
         self.grid_radius = grid_radius
         self.grid_center = grid_center
         self.grid_points = None
+
+        # GPU configuration
+        self.use_gpu = use_gpu
+        self.gpu_device = gpu_device
+        self.gpu_provider = gpu_provider
+
+        # Log GPU usage
+        if self.use_gpu:
+            self.logger.info(f"[RA] GPU acceleration enabled using {gpu_provider}")
+            if gpu_device:
+                self.logger.info(f"[RA] GPU device: {gpu_device}")
+        else:
+            self.logger.info("[RA] Using CPU-only mode")
 
         # Setup parallel processing
         if n_processes is None:
@@ -2720,7 +2857,7 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
                  n_processes=None, output_dir=None, grid_spacing=0.375,
                  grid_radius=10.0, grid_center=None, temperature_start=5.0,
                  temperature_end=0.1, cooling_factor=0.95, mutation_rate=0.3,
-                 crossover_rate=0.7, local_opt_frequency=5):
+                 crossover_rate=0.7, local_opt_frequency=5, use_gpu=False, gpu_device=None, gpu_provider=None, **kwargs):
         """
         Initialize hybrid search algorithm.
         
@@ -2777,6 +2914,17 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
         # Local optimization parameters
         self.local_opt_frequency = local_opt_frequency
         
+        # GPU configuration parameters
+        self.use_gpu = use_gpu
+        self.gpu_device = gpu_device
+        self.gpu_provider = gpu_provider
+
+        # Log GPU usage
+        if self.use_gpu:
+            self.logger.info(f"[HYBRID] GPU acceleration enabled using {gpu_provider}")
+        else:
+            self.logger.info("[HYBRID] Using CPU-only mode")
+
         # Setup parallel processing
         if n_processes is None:
             self.n_processes = mp.cpu_count()

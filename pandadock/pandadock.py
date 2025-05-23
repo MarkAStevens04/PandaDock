@@ -11,6 +11,9 @@ from .search import DockingSearch
 import time as time
 import pathlib as Path
 import os
+from .utils import setup_logging
+
+
 
 class PANDADOCKAlgorithm(DockingSearch):
     """
@@ -97,6 +100,7 @@ class PANDADOCKAlgorithm(DockingSearch):
                     f"ATOM  {i+1:5d}  X   SPH A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          X\n"
                 )
             f.write("END\n")
+
 
     def search(self, protein, ligand):
         """

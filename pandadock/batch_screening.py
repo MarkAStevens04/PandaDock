@@ -27,8 +27,6 @@ from .utils import calculate_rmsd
 from scipy.spatial.transform import Rotation
 from .preparation import prepare_protein, prepare_ligand
 from .main_integration import (
-    configure_hardware,
-    setup_hardware_acceleration,
     create_optimized_scoring_function,
     create_optimized_search_algorithm,
     get_algorithm_kwargs_from_args
