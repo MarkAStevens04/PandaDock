@@ -3469,35 +3469,183 @@ class HybridSearch(GridUtilsMixin, ClashDetectionMixin, PoseGenerationMixin, Opt
                         individual.atoms[i]['coords'] = backup.atoms[i]['coords']
         
         return individual
-    def _generate_valid_pose(self, protein, ligand, center, radius):
-        pose = copy.deepcopy(ligand)
+    def _generate_valid_pose(self, protein, ligand, center, radius, max_attempts=20):
+        """
+        Enhanced pose generation with clash relief for hybrid search.
+        
+        Parameters:
+        -----------
+        protein : Protein
+            Protein object
+        ligand : Ligand
+            Ligand template
+        center : numpy.ndarray
+            Center coordinates of the search space
+        radius : float
+            Radius of the search sphere
+        max_attempts : int
+            Maximum number of generation attempts
+            
+        Returns:
+        --------
+        Ligand
+            Valid ligand pose or None if failed
+        """
+        for attempt in range(max_attempts):
+            pose = copy.deepcopy(ligand)
 
-        # Step 1: Center ligand to origin
-        centroid = np.mean(pose.xyz, axis=0)
-        pose.translate(-centroid)
+            # Step 1: Center ligand to origin
+            centroid = np.mean(pose.xyz, axis=0)
+            pose.translate(-centroid)
 
-        # Step 2: Apply random rotation at origin
-        rotation_matrix = Rotation.random().as_matrix()
-        pose.rotate(rotation_matrix)
+            # Step 2: Apply random rotation at origin
+            rotation_matrix = Rotation.random().as_matrix()
+            pose.rotate(rotation_matrix)
 
-        # Step 3: Sample a valid point within the search sphere
-        r = radius * random.random() ** (1.0/3.0)
-        theta = random.uniform(0, 2 * np.pi)
-        phi = random.uniform(0, np.pi)
-        x = r * np.sin(phi) * np.cos(theta)
-        y = r * np.sin(phi) * np.sin(theta)
-        z = r * np.cos(phi)
+            # Step 3: Use grid points if available, otherwise random sampling
+            if hasattr(self, 'grid_points') and self.grid_points is not None and len(self.grid_points) > 0:
+                # Use precomputed grid points (like genetic algorithm)
+                point_in_sphere = random.choice(self.grid_points)
+            else:
+                # Fall back to random sampling
+                r = radius * random.random() ** (1.0/3.0)
+                theta = random.uniform(0, 2 * np.pi)
+                phi = random.uniform(0, np.pi)
+                x = r * np.sin(phi) * np.cos(theta)
+                y = r * np.sin(phi) * np.sin(theta)
+                z = r * np.cos(phi)
+                point_in_sphere = center + np.array([x, y, z])
 
-        point_in_sphere = center + np.array([x, y, z])
+            # Step 4: Translate pose to point in sphere
+            pose.translate(point_in_sphere)
 
-        # Step 4: Translate pose to point in sphere
-        pose.translate(point_in_sphere)
+            # Step 5: Initial validation
+            if self._check_pose_validity(pose, protein):
+                return pose
+            
+            # Step 6: Try clash relief if initial validation fails
+            try:
+                if hasattr(self, '_gentle_clash_relief'):
+                    # Use clash relief from ClashDetectionMixin
+                    relieved_pose = self._gentle_clash_relief(
+                        protein, pose, max_steps=5, max_movement=0.3, 
+                        radius=radius, center=center
+                    )
+                    
+                    # Check if clash relief worked
+                    if self._check_pose_validity(relieved_pose, protein):
+                        return relieved_pose
+            except Exception as e:
+                self.logger.debug(f"Clash relief failed: {e}")
+            
+            # Step 7: Try moving away from protein center
+            try:
+                # Calculate protein center
+                if hasattr(protein, 'active_site') and 'atoms' in protein.active_site:
+                    protein_atoms = protein.active_site['atoms']
+                else:
+                    protein_atoms = protein.atoms
+                
+                protein_coords = np.array([atom['coords'] for atom in protein_atoms])
+                protein_center = np.mean(protein_coords, axis=0)
+                
+                # Move ligand away from protein center
+                ligand_center = np.mean(pose.xyz, axis=0)
+                away_vector = ligand_center - protein_center
+                
+                if np.linalg.norm(away_vector) > 0:
+                    away_vector = away_vector / np.linalg.norm(away_vector)
+                    # Small outward movement
+                    pose.translate(away_vector * 0.5)
+                    
+                    # Ensure still inside sphere
+                    if not is_inside_sphere(pose, center, radius):
+                        pose = enforce_sphere_boundary(pose, center, radius)
+                    
+                    # Check validity after movement
+                    if self._check_pose_validity(pose, protein):
+                        return pose
+            except Exception as e:
+                self.logger.debug(f"Outward movement failed: {e}")
+        
+        # If all attempts failed, return None
+        self.logger.debug(f"Failed to generate valid pose after {max_attempts} attempts")
+        return None
 
-        # Step 5: Validate pose
-        if self._check_pose_validity(pose, protein):
-            return pose
+
+    def _initialize_population(self, protein, ligand, center, radius):
+        """
+        Enhanced population initialization with better error handling.
+        """
+        population = []
+        
+        self.logger.info(f"Initializing population with {self.population_size} individuals")
+        
+        # Initialize grid points for sampling (like genetic algorithm)
+        self.initialize_grid_points(center, protein=protein, radius=radius)
+        
+        # Increase max attempts and add more robust retry logic
+        attempts = 0
+        max_attempts = self.population_size * 20  # Increased from 10 to 20
+        consecutive_failures = 0
+        max_consecutive_failures = 50  # If 50 consecutive failures, expand radius
+        
+        # Initialize progress bar
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(total=self.population_size, desc="Initializing population")
+        except ImportError:
+            progress_bar = None
+        
+        # Generate initial population with enhanced retry logic
+        while len(population) < self.population_size and attempts < max_attempts:
+            attempts += 1
+            
+            # Dynamically adjust radius if too many consecutive failures
+            current_radius = radius
+            if consecutive_failures > max_consecutive_failures:
+                current_radius = radius * 1.2  # Expand radius by 20%
+                self.logger.warning(f"Expanding search radius to {current_radius:.2f} due to consecutive failures")
+                consecutive_failures = 0  # Reset counter
+            
+            pose = self._generate_valid_pose(protein, ligand, center, current_radius, max_attempts=10)
+            
+            if pose is None:
+                consecutive_failures += 1
+                continue
+            
+            # Reset consecutive failures counter on success
+            consecutive_failures = 0
+                
+            # Score the pose
+            try:
+                score = self.scoring_function.score(protein, pose)
+                population.append((pose, score))
+                
+                if progress_bar:
+                    progress_bar.update(1)
+                    if len(population) > 0:
+                        progress_bar.set_postfix({"Best": f"{min(p[1] for p in population):.4f}"})
+                elif len(population) % 5 == 0:
+                    self.logger.info(f"Generated {len(population)}/{self.population_size} valid poses")
+            except Exception as e:
+                self.logger.warning(f"Error scoring pose during initialization: {e}")
+                consecutive_failures += 1
+        
+        if progress_bar:
+            progress_bar.close()
+            
+        if len(population) < self.population_size:
+            self.logger.warning(f"Could only generate {len(population)}/{self.population_size} valid poses after {attempts} attempts")
+            # If we got at least some poses, continue with smaller population
+            if len(population) >= self.population_size // 2:
+                self.logger.info(f"Continuing with reduced population size: {len(population)}")
+            else:
+                self.logger.error("Too few valid poses generated. Consider increasing search radius or using --prepare-molecules.")
         else:
-            return None
+            self.logger.info(f"Successfully generated {len(population)} valid poses (took {attempts} attempts)")
+        
+        return population
 
 
 # ------------------------------------------------------------------------------
