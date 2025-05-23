@@ -1591,6 +1591,7 @@ def save_metal_docking_results(results, metal_centers, output_dir, top_n=10):
         Number of top poses to analyze in detail
     """
     from .metal_docking import MetalDockingPreparation
+    import copy
     
     output_path = Path(output_dir)
     
